@@ -5,13 +5,14 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import db
+from publication import public_payload, safe_url
 
 SERVICE = "web"
 
 PAGE = """<!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Desk Research: разговоры об AI</title>
+<title>Ближе к собаке</title>
 <style>
   body {{ font-family: -apple-system, system-ui, sans-serif; margin: 0; background: #f6f5f1; color: #1a1a1a; }}
   main {{ max-width: 960px; margin: 0 auto; padding: 24px 16px; }}
@@ -28,10 +29,12 @@ PAGE = """<!doctype html>
   th {{ font-weight: 600; background: #ecebe5; }}
   a {{ color: #1a1a1a; }}
   .tag {{ background: #e8f5c8; padding: 1px 6px; white-space: nowrap; }}
+  article {{ background: #fff; padding: 20px; margin: 16px 0; border: 1px solid #e3e1da; }}
+  article p {{ line-height: 1.65; }}
 </style></head>
 <body><main>
-<h1>Desk Research: разговоры об AI</h1>
-<div class="muted">Система ведущих потока. Страница обновляется при каждом открытии.</div>
+<h1>Ближе к собаке</h1>
+<div class="muted">Проверяемые объяснения исследований о поведении, обучении и благополучии собак.</div>
 
 <div class="map">
   <div class="block"><b>Сбор</b><span>collector: обходит источники</span></div><div class="arrow">&rarr;</div>
@@ -47,13 +50,29 @@ PAGE = """<!doctype html>
   <div>Последний сбор: <b>{last_run}</b></div>
 </div>
 
-<table>
-<tr><th>Когда</th><th>Источник</th><th>Компания</th><th>О чем</th></tr>
 {rows}
-</table>
 </main></body></html>"""
 
-ROW = '<tr><td>{date}</td><td>{source}</td><td>{entity}</td><td><a href="{url}" target="_blank">{summary}</a></td></tr>'
+def article_html(summary, payload, url, published, source):
+    article = public_payload(payload)
+    out = [f'<article><p class="muted">{published:%d.%m.%Y} UTC · {html.escape(source)}</p>',
+           f'<h2>{html.escape(summary)}</h2>']
+    if article:
+        out.append(f'<span class="tag">{html.escape(article["topic_label"])}</span>')
+        for paragraph in article['paragraphs']:
+            kind = 'Результат исследования' if paragraph['kind'] == 'result' else 'Как это понимать'
+            reference = html.escape(article['citations'][0]['url'], quote=True)
+            out.append(f'<p class="muted">{kind}</p><p>{html.escape(paragraph["text"])} <a href="{reference}" target="_blank" rel="noopener noreferrer">[1]</a></p>')
+        out.append(f'<h3>Что важно учитывать</h3><p>{html.escape(article["limitations"])}</p>')
+        out.append('<p class="muted">Основано на аннотации, полный текст не проверен</p><h3>Научный источник</h3>')
+        for citation in article['citations']:
+            label = '. '.join(citation[key] for key in ('authors', 'title', 'journal', 'year') if citation[key])
+            out.append(f'<p><a href="{html.escape(citation["url"], quote=True)}" target="_blank" rel="noopener noreferrer">{html.escape(label)}</a></p>')
+    else:
+        out.append('<p class="muted">Краткая запись прежнего формата</p>')
+    if safe_url(url):
+        out.append(f'<p><a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">Исходная запись</a></p>')
+    return ''.join(out) + '</article>'
 
 
 def render(conn):
@@ -66,27 +85,19 @@ def render(conn):
     ).fetchone()
     last_run = f"{last[1]:%d.%m %H:%M} UTC, {last[0]}" if last else "еще не было"
     rows = conn.execute(
-        """SELECT m.published_at, s.name, f.entity, f.summary, m.url
+        """SELECT coalesce(f.published_at,f.created_at), s.name, f.publication_payload, f.summary, m.url
            FROM findings f
            JOIN materials m ON m.id = f.material_id
            JOIN sources s ON s.id = m.source_id
            WHERE f.publication_status = 'published'
-           ORDER BY m.published_at DESC NULLS LAST LIMIT 100"""
+           ORDER BY coalesce(f.published_at,f.created_at) DESC,f.id DESC LIMIT 100"""
     ).fetchall()
     rows_html = (
         "\n".join(
-            ROW.format(
-                date=f"{published:%d.%m %H:%M}" if published else "",
-                source=html.escape(source),
-                entity=f'<span class="tag">{html.escape(entity)}</span>'
-                if entity
-                else "",
-                summary=html.escape(summary),
-                url=html.escape(url, quote=True),
-            )
-            for published, source, entity, summary, url in rows
+            article_html(summary, payload, url, published, source)
+            for published, source, payload, summary, url in rows
         )
-        or '<tr><td colspan="4">Находок пока нет</td></tr>'
+        or '<p>Находок пока нет — материалы появятся после проверки и допуска.</p>'
     )
     return PAGE.format(
         sources=sources,

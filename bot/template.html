@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Desk Research</title>
+<title>Ближе к собаке</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 /*BRAND*/
@@ -117,8 +117,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 <div class="app">
   <header class="head" id="head">
     <div class="brand">
-      <h1 class="wordmark">Desk Research</h1>
-      <span class="label">AI</span>
+      <h1 class="wordmark">Ближе к собаке</h1>
+      <span class="label">Наука рядом</span>
     </div>
     <div class="label meta" id="meta"></div>
   </header>
@@ -167,12 +167,13 @@ const tags = (f) => (f.reason || "").split(/,\s*/).map((t) => t.trim()).filter((
 const haptic = () => { if (inTelegram && tg.HapticFeedback) tg.HapticFeedback.selectionChanged(); };
 
 function openLink(url) {
+  if (!/^https?:\/\//i.test(url || "")) return;
   if (inTelegram) tg.openLink(url); else window.open(url, "_blank", "noopener");
 }
 
 const findings = DATA.findings;
 const lastRun = DATA.run ? DATA.run.id : null;
-const state = { view: "feed", period: "all", company: "all", open: null, feedScroll: 0 };
+const state = { view: "feed", period: "all", topic: "all", open: null, feedScroll: 0 };
 
 const PERIODS = [
   { key: "all", name: "Все", days: Infinity },
@@ -181,10 +182,10 @@ const PERIODS = [
   { key: "month", name: "Месяц", days: 31 },
 ];
 const inPeriod = (f, key) => (Date.now() - new Date(f.date).getTime()) / 864e5 <= PERIODS.find((x) => x.key === key).days;
-const companies = [...new Set(findings.map((f) => f.reason).filter(Boolean))].sort((a, b) => findings.filter((f) => f.reason === b).length - findings.filter((f) => f.reason === a).length);
-const byCompany = (f, c) => c === "all" || f.reason === c;
+const topics = [...new Set(findings.map((f) => f.reason).filter(Boolean))].sort();
+const byTopic = (f, c) => c === "all" || f.reason === c;
 const visible = () => findings
-  .filter((f) => inPeriod(f, state.period) && byCompany(f, state.company))
+  .filter((f) => inPeriod(f, state.period) && byTopic(f, state.topic))
   .sort((a, b) => b.date.localeCompare(a.date));
 
 /* ---------- filters ---------- */
@@ -193,15 +194,15 @@ function renderFilters() {
   $("#filters").style.display = show ? "" : "none";
   if (!show) return;
   $("#periods").innerHTML = PERIODS.map((p) => {
-    const n = findings.filter((f) => inPeriod(f, p.key) && byCompany(f, state.company)).length;
+    const n = findings.filter((f) => inPeriod(f, p.key) && byTopic(f, state.topic)).length;
     return `<button class="chip" data-period="${p.key}" aria-pressed="${state.period === p.key}">${p.name}<span class="num">${n}</span></button>`;
   }).join("");
-  $("#sources").innerHTML = ["all", ...companies].map((c) => {
-    const n = findings.filter((f) => inPeriod(f, state.period) && byCompany(f, c)).length;
-    return `<button class="chip" data-company="${esc(c)}" aria-pressed="${state.company === c}">${c === "all" ? "Все компании" : esc(c)}<span class="num">${n}</span></button>`;
+  $("#sources").innerHTML = ["all", ...topics].map((c) => {
+    const n = findings.filter((f) => inPeriod(f, state.period) && byTopic(f, c)).length;
+    return `<button class="chip" data-topic="${esc(c)}" aria-pressed="${state.topic === c}">${c === "all" ? "Все темы" : esc(c)}<span class="num">${n}</span></button>`;
   }).join("");
   document.querySelectorAll("[data-period]").forEach((b) => b.onclick = () => { state.period = b.dataset.period; haptic(); render(); });
-  document.querySelectorAll("[data-company]").forEach((b) => b.onclick = () => { state.company = b.dataset.company; haptic(); render(); });
+  document.querySelectorAll("[data-topic]").forEach((b) => b.onclick = () => { state.topic = b.dataset.topic; haptic(); render(); });
 }
 
 /* ---------- feed ---------- */
@@ -228,8 +229,9 @@ function renderFeed() {
 function renderDetail(f) {
   const list = visible();
   const at = list.findIndex((x) => x.id === f.id);
-  const same = f.summary.trim() === f.title.trim();
-  const text = f.text ? esc(f.text) + (f.text.length >= 600 ? "…" : "") : "";
+  const article = f.article || {};
+  const paragraphs = article.paragraphs || [];
+  const citations = article.citations || [];
   return `<article class="detail">
     <div class="bar">
       ${inTelegram ? `<span class="label">${esc(f.source)}</span>` : `<button class="back" data-back>← Лента</button>`}
@@ -241,32 +243,20 @@ function renderDetail(f) {
     </div>
     <span class="label">${esc(f.source)} · ${day(f.date)}${f.run_id === lastRun ? " · новое" : ""}</span>
     <h2>${esc(f.summary)}</h2>
-    ${same ? "" : `<p class="orig">${esc(f.title)}</p>`}
-    ${text ? `<p class="excerpt">${text}</p>` : ""}
+    ${article.format_label ? `<span class="label">${esc(article.format_label)}</span>` : ""}
+    ${paragraphs.length ? paragraphs.map((p) => `<section>
+      <span class="label">${p.kind === "interpretation" ? "Как это понимать" : "Результат исследования"}</span>
+      <p class="excerpt" style="color:var(--fg)">${esc(p.text)} <a href="#source-${f.id}-1" aria-label="Источник">[1]</a></p>
+    </section>`).join("") : `<p class="orig">Краткая запись прежнего формата. ${esc(f.title)}</p>`}
+    ${article.limitations ? `<section><h3>Что важно учитывать</h3><p class="excerpt">${esc(article.limitations)}</p>
+      <p class="label">Основано на аннотации, полный текст не проверен</p></section>` : ""}
     ${tags(f).length ? `<div class="tags">${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>` : ""}
-    ${inTelegram ? "" : `<button class="btn main" data-url="${esc(f.url)}">Открыть материал</button>`}
-    <section class="trace">
-      <span class="label">Связи</span>
-      <h3>Откуда эта находка</h3>
-      <p class="say">В каждой записи лежит номер записи из другой таблицы. По этим номерам от находки доходим до источника.</p>
-      <div class="rec">
-        <span class="label"><span>findings</span><span class="num">id ${f.id}</span></span>
-        <p class="key">entity = ${esc(f.reason || "—")} · model = ${esc(f.model)}</p>
-        <p class="key">material_id = ${f.material_id}${f.sent_at ? ` · отправлена ${esc(f.sent_at.slice(0, 16).replace("T", " "))}` : ""}</p>
-      </div>
-      <span class="link">material_id → materials.id</span>
-      <div class="rec">
-        <span class="label"><span>materials</span><span class="num">id ${f.material_id}</span></span>
-        <p>${esc(f.title)}</p>
-        <p class="key">source_id = ${f.source_id} · run_id = ${f.run_id == null ? "—" : f.run_id}</p>
-      </div>
-      <span class="link">source_id → sources.id</span>
-      <div class="rec">
-        <span class="label"><span>sources</span><span class="num">id ${f.source_id}</span></span>
-        <p>${esc(f.source)}</p>
-        <p class="key">${esc(f.source_url)}</p>
-      </div>
-    </section>
+    ${citations.length ? `<section><h3>Научный источник</h3>${citations.map((c, i) => `
+      <p id="source-${f.id}-${i + 1}" class="excerpt">[${i + 1}] ${esc(c.authors)}. ${esc(c.title)}.
+      ${esc(c.journal)} ${esc(c.year)}.
+      ${/^https?:\/\//i.test(c.url || "") ? `<a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">Открыть аннотацию</a>` : ""}
+      ${c.doi ? `<span> DOI: ${esc(c.doi)}</span>` : ""}</p>`).join("")}</section>` : ""}
+    ${!inTelegram && /^https?:\/\//i.test(f.url || "") ? `<button class="btn main" data-url="${esc(f.url)}">Открыть исходную запись</button>` : ""}
   </article>`;
 }
 
@@ -286,8 +276,8 @@ function renderHow() {
       say: `В базе Postgres сейчас ${t.materials} ${plural(t.materials, "материал", "материала", "материалов")}. Повторы она не пускает.`,
       more: `У ссылки в таблице <code>materials</code> стоит правило <code>UNIQUE</code>: одна ссылка не попадет в базу дважды. Каждый материал знает свой источник (<code>source_id</code>) и прогон сбора (<code>run_id</code>).` },
     { verb: "Разобрал", metric: `<mark>${r.kept}</mark>`,
-      say: `Обработано ${r.processed} ${plural(r.processed, "материал", "материала", "материалов")}. Допущено к публикации: ${r.kept}. Пропущено как не про AI: ${r.skipped}${r.failed ? `, ${r.failed} не разобрано` : ""}${r.waiting ? `, ${r.waiting} ждут очереди` : ""}.`,
-      more: `Модель работает в <code>worker/main.py</code>: определяет, про AI ли материал, пишет одну фразу и выбирает компанию. Результат сохраняется в <code>findings</code> как скрытый черновик. Только статус <code>published</code> разрешает показ читателям; обработка сама по себе не означает публикацию.` },
+      say: `Обработано ${r.processed} ${plural(r.processed, "материал", "материала", "материалов")}. Опубликовано: ${r.kept}. Удержано: ${r.held || 0}; ошибки: ${r.errors || 0}${r.waiting ? `; ${r.waiting} ждут очереди` : ""}.`,
+      more: `Редакция сверяет научный источник и существенные выводы, затем отдельно проверяет текст и риск. Удержанные материалы остаются скрытыми. Дневной предел — три публикации; отсутствие данных не заменяется догадками.` },
     { verb: "Отправил", metric: r.sent,
       say: r.sent ? `Бот прислал ${r.sent} ${plural(r.sent, "находку", "находки", "находок")} подписчикам: их ${t.subscribers}.` : `Из этого сбора бот еще ничего не рассылал. Подписчиков: ${t.subscribers}.`,
       more: `Когда обработка сбора завершена, бот включает в сводку только опубликованные находки и ставит им отметку <code>sent_at</code>. Черновики в рассылку не попадают. Код: <code>bot/main.py</code>.` },
@@ -365,7 +355,7 @@ function render() {
   view.querySelectorAll("[data-step]").forEach((b) => b.onclick = () => stepFinding(Number(b.dataset.step)));
   view.querySelectorAll("[data-url]").forEach((b) => b.onclick = () => openLink(b.dataset.url));
   view.querySelectorAll("[data-back]").forEach((b) => b.onclick = closeDetail);
-  view.querySelectorAll("[data-reset]").forEach((b) => b.onclick = () => { state.period = "all"; state.company = "all"; render(); });
+  view.querySelectorAll("[data-reset]").forEach((b) => b.onclick = () => { state.period = "all"; state.topic = "all"; render(); });
   view.querySelectorAll(".stepbox").forEach((b) => b.onclick = () => b.setAttribute("aria-expanded", b.getAttribute("aria-expanded") !== "true"));
   view.querySelectorAll(".step").forEach((s, i) => setTimeout(() => s.classList.add("shown"), 80 + i * 160));
 

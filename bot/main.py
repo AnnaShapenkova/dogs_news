@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import db
+from publication import public_payload, safe_url, TOPICS
 
 SERVICE = "bot"
 HERE = Path(__file__).resolve().parent
@@ -82,7 +83,9 @@ def say(chat_id, text, button=True):
 def finding_lines(rows):
     lines = []
     for summary, entity, url, source in rows:
-        line = f'• <a href="{html.escape(url)}">{html.escape(summary)}</a>\n  {html.escape(source)}'
+        link = safe_url(url)
+        heading = f'<a href="{html.escape(link)}">{html.escape(summary)}</a>' if link else html.escape(summary)
+        line = f'• {heading}\n  {html.escape(source)}'
         if entity:
             line += f" · {html.escape(entity)}"
         lines.append(line)
@@ -120,10 +123,9 @@ def setup(conn):
 
 def send_new(conn):
     """One message per collection: waits until the worker has sorted it, then sends a summary to every subscriber."""
-    # the worker is still busy while materials wait in the queue or the collector is running
+    # Unprocessed/held inputs and the legacy AI queue must not block published content.
     busy = conn.execute(
-        "SELECT EXISTS (SELECT 1 FROM materials WHERE status = 'new')"
-        " OR EXISTS (SELECT 1 FROM runs WHERE service = 'collector' AND status IN ('started', 'running')"
+        "SELECT EXISTS (SELECT 1 FROM runs WHERE service = 'worker' AND status IN ('started', 'running')"
         "            AND started_at > now() - interval '30 minutes')"
     ).fetchone()[0]
     if busy:
@@ -136,19 +138,14 @@ def send_new(conn):
     ]
     if not subscribers or not ids:
         return
-    companies = conn.execute(
-        "SELECT coalesce(entity, 'без компании'), count(*) FROM findings"
-        " WHERE id = ANY(%s) AND publication_status = 'published'"
-        " GROUP BY entity ORDER BY entity IS NULL, count(*) DESC",
-        (ids,),
-    ).fetchall()
     latest = conn.execute(
-        "SELECT f.summary, f.entity, m.url, s.name FROM findings f"
+        "SELECT f.summary, f.publication_payload->>'topic', coalesce(f.publication_payload->'citations'->0->>'url',m.url), s.name FROM findings f"
         " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
         " WHERE f.id = ANY(%s) AND f.publication_status = 'published' ORDER BY f.id DESC LIMIT %s",
         (ids, LATEST),
     ).fetchall()
-    text = f"<b>Новых находок: {len(ids)}</b>\n" + " · ".join(f"{html.escape(name)} {count}" for name, count in companies)
+    latest = [(summary, TOPICS.get(topic, ''), url, source) for summary, topic, url, source in latest]
+    text = f"<b>Новых находок: {len(ids)}</b>\nБлиже к собаке"
     text += "\n\nСвежие:\n\n" + "\n\n".join(finding_lines(latest))
     if len(ids) > LATEST:
         text += f"\n\nЕще {len(ids) - LATEST} в ленте."
@@ -192,6 +189,22 @@ def status_text(conn):
         " (SELECT count(*) FROM subscribers)"
     ).fetchone()
     lines.append(f"\nВсего находок {findings}, подписчиков {subscribers}.")
+    states = dict(conn.execute("SELECT status,count(*) FROM materials GROUP BY status").fetchall())
+    lines.append(f"Ожидают проверки: {states.get('collected', 0)}; удержаны: {states.get('held', 0)}; ошибки: {states.get('error', 0)}.")
+    reasons = conn.execute(
+        "SELECT editorial_result->>'reason',count(*) FROM materials WHERE status IN ('held','error')"
+        " AND editorial_result IS NOT NULL GROUP BY 1 ORDER BY count(*) DESC LIMIT 8"
+    ).fetchall()
+    reason_names = {
+        'insufficient_content': 'недостаточно содержания', 'unlinked_secondary': 'нет явного первоисточника',
+        'ambiguous_source': 'неоднозначный источник', 'risk_requires_review': 'риск требует проверки',
+        'review_not_approved': 'проверка текста не пройдена', 'source_unavailable': 'источник недоступен',
+        'unverified_claim': 'вывод не подтверждён фрагментом', 'publication_requires_review': 'статус работы требует проверки',
+        'outside_pilot': 'тема вне пилота', 'duplicate_evidence': 'исследование уже опубликовано',
+        'model_unavailable_or_invalid_json': 'ошибка ответа модели', 'source_changed': 'содержание источника изменилось',
+    }
+    for reason, count in reasons:
+        lines.append(f"• {reason_names.get(reason, 'нужна дополнительная проверка')}: {count}")
     return "\n".join(lines)
 
 
@@ -208,11 +221,12 @@ def handle(conn, message):
             (chat["id"], name),
         )
         latest = conn.execute(
-            "SELECT f.summary, f.entity, m.url, s.name FROM findings f"
+            "SELECT f.summary, f.publication_payload->>'topic', coalesce(f.publication_payload->'citations'->0->>'url',m.url), s.name FROM findings f"
             " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
             " WHERE f.publication_status = 'published' ORDER BY f.id DESC LIMIT 5"
         ).fetchall()
-        text = "Готово, вы подписаны. После каждого сбора пришлю сюда одну сводку: сколько новых находок и по каким компаниям."
+        latest = [(summary, TOPICS.get(topic, ''), url, source) for summary, topic, url, source in latest]
+        text = "Вы подписаны на «Ближе к собаке». Здесь будут проверенные объяснения исследований о поведении, обучении и благополучии собак."
         if latest:
             text += "\n\nПоследние:\n\n" + "\n\n".join(finding_lines(latest))
         text += "\n\nВсе находки в ленте: кнопка ниже или «Лента» рядом с полем ввода. /status покажет, как работают блоки."
@@ -274,36 +288,19 @@ def iso(moment):
 
 
 def page_data(conn):
-    fields = (
-        "id",
-        "material_id",
-        "summary",
-        "reason",
-        "title",
-        "url",
-        "date",
-        "run_id",
-        "source_id",
-        "source",
-        "source_url",
-        "text",
-        "sent_at",
-        "model",
-    )
     findings = []
     for row in conn.execute(
-        "SELECT f.id, m.id, f.summary, f.entity, m.title, m.url, coalesce(m.published_at, m.collected_at), m.run_id,"
-        " s.id, s.name, s.url, left(m.text, 600), f.sent_at, f.model"
-        " FROM findings f JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
-        " WHERE f.publication_status = 'published'"
-        " ORDER BY f.id DESC LIMIT 300"
+        "SELECT f.id,f.summary,f.publication_payload,coalesce(f.published_at,f.created_at),"
+        " m.title,m.url,m.published_at,m.run_id,s.name"
+        " FROM findings f JOIN materials m ON m.id=f.material_id JOIN sources s ON s.id=m.source_id"
+        " WHERE f.publication_status='published' ORDER BY coalesce(f.published_at,f.created_at) DESC,f.id DESC LIMIT 300"
     ):
-        finding = dict(zip(fields, row))
-        finding["date"], finding["sent_at"] = (
-            iso(finding["date"]),
-            iso(finding["sent_at"]),
-        )
-        findings.append(finding)
+        fid, summary, payload, published, title, url, source_date, run_id, source = row
+        article = public_payload(payload)
+        findings.append({"id": fid, "summary": summary, "date": iso(published),
+                         "title": title, "url": safe_url(url), "source_date": iso(source_date),
+                         "run_id": run_id, "source": source, "article": article,
+                         "reason": article.get("topic_label", ""), "topic": article.get("topic", "")})
 
     run = conn.execute(
         "SELECT id, finished_at, status, items FROM runs WHERE service = 'collector' AND status <> 'started'"
@@ -333,13 +330,14 @@ def page_data(conn):
             "finished_at": iso(run[1]),
             "status": run[2],
             "added": added,
-            "processed": statuses.get("done", 0)
-            + statuses.get("skipped", 0)
-            + statuses.get("failed", 0),
+            "processed": statuses.get("done", 0) + statuses.get("held", 0) + statuses.get("error", 0)
+            + statuses.get("skipped", 0) + statuses.get("failed", 0),
             "kept": kept,
             "skipped": statuses.get("skipped", 0),
             "failed": statuses.get("failed", 0),
-            "waiting": statuses.get("new", 0),
+            "waiting": statuses.get("collected", 0),
+            "held": statuses.get("held", 0),
+            "errors": statuses.get("error", 0),
             "sent": sent,
         }
         sources = [

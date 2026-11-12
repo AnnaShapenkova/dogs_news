@@ -237,20 +237,18 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('Еще 2 в ленте', text)
         self.assert_hidden(text)
 
-    def test_worker_result_stays_draft_and_hidden(self):
+    def test_legacy_ai_queue_stays_hidden_and_is_not_processed(self):
         material_id = self.material('SECRET_DRAFT', status='new')
         with patch.object(worker, 'ask_model', return_value={
             'about_ai': True, 'entity': 'OpenAI', 'summary': 'SECRET_DRAFT',
             'publication_status': 'published',  # untrusted model output cannot grant publication
-        }) as model:
+        }) as model, patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}):
             worker.process_new(self.conn)
-        model.assert_called_once()
-        self.assertEqual(self.conn.execute(
-            'SELECT publication_status FROM findings WHERE material_id = %s', (material_id,),
-        ).fetchone()[0], 'draft')
+        model.assert_not_called()
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM findings WHERE material_id=%s', (material_id,)).fetchone()[0], 0)
         self.assertEqual(self.conn.execute(
             'SELECT status FROM materials WHERE id = %s', (material_id,),
-        ).fetchone()[0], 'done')
+        ).fetchone()[0], 'new')
         self.assertEqual(bot.page_data(self.conn)['findings'], [])
         self.assert_hidden(web.render(self.conn))
         self.start()

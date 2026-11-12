@@ -1,0 +1,232 @@
+"""Source verification and fail-closed editorial contracts for the narrow pilot."""
+
+import hashlib
+import json
+import re
+import unicodedata
+import urllib.parse
+import xml.etree.ElementTree as ET
+
+from collector.main import fetch, plain_text, DOG_WORDS, TOPIC_WORDS
+from publication import TOPICS, FORMATS
+
+RULES_VERSION = "dogs-pilot-v1"
+API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+RISK = re.compile(
+    r"\b(?:aggress\w*|bit(?:e|es|ing)|aversive|punish\w*|shock|chok\w*|dos(?:e|es|age)|"
+    r"drug\w*|medicat\w*|medicin\w*|treat(?:ment|ments|ing)|therap\w*|diagnos\w*|"
+    r"diet\w*|cancer\w*|tumou?r\w*|pain|rehabilitat\w*|clinical trial|"
+    r"леч[а-яё]*|лекарств[а-яё]*|доз(?:а|ы|у|ой|иров[а-яё]*)|диет[а-яё]*|диагноз[а-яё]*|"
+    r"агресси[а-яё]*|укус[а-яё]*|наказан[а-яё]*|электроошейн[а-яё]*|удуш[а-яё]*|болев[а-яё]*|боль|онколо[а-яё]*)\b", re.I
+)
+INSTRUCTIONS = re.compile(
+    r"\b(?:дайте|давайте|используйте|попробуйте|обратитесь|применяйте|следует|нужно|необходимо|"
+    r"рекомендуем|рекомендуется|назначьте|administer|you should|you must|give your dog|try this)\b", re.I
+)
+OVERCLAIM = re.compile(r"\b(?:доказали|гарантиру[а-яё]*|всегда|все собаки|консенсус|безусловно|proves|guarantee\w*|all dogs|always)\b", re.I)
+INJECTION = re.compile(r"(?:ignore (?:all |previous )?instructions|system prompt|игнорируй[а-яё]* (?:все |предыдущие )?инструкц|раскрой[а-яё]* (?:ключ|токен))", re.I)
+DOI = re.compile(r"10\.\d{4,9}/[^\s<>\"?#]+", re.I)
+
+
+class Hold(Exception):
+    pass
+
+
+class Failure(Exception):
+    pass
+
+
+def normal(value):
+    return " ".join(unicodedata.normalize("NFC", value).split())
+
+
+def doi_value(value):
+    if not value:
+        return ""
+    if not isinstance(value, str):
+        raise Hold("invalid_doi")
+    value = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value.strip(), flags=re.I)
+    if not DOI.fullmatch(value) or len(value) > 200:
+        raise Hold("invalid_doi")
+    return value.lower()
+
+
+def input_hash(material):
+    value = {key: material.get(key) for key in ("url", "title", "text", "raw_payload", "content_scope")}
+    try:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+    except (ValueError, TypeError, UnicodeError):
+        raise Hold("invalid_input") from None
+
+
+def secondary_identifiers(record):
+    if not isinstance(record, str):
+        raise Hold("unlinked_secondary")
+    try:
+        item = ET.fromstring(record)
+    except ET.ParseError:
+        raise Hold("unlinked_secondary") from None
+    content = " ".join(item.itertext())
+    # Only explicit identifiers/links, never a guessed match by topic or headline.
+    dois = {doi_value(m.group(1).rstrip('.,;')) for m in re.finditer(
+        r'(?:https?://(?:dx\.)?doi\.org/|doi\s*:\s*)(10\.\d{4,9}/[^\s<>"?#&]+)', content, re.I)}
+    for element in item.iter():
+        if element.tag.rsplit('}', 1)[-1].lower() == 'doi' and element.text:
+            dois.add(doi_value(element.text))
+    pmids = set(re.findall(r'(?:pubmed\.ncbi\.nlm\.nih\.gov/|europepmc\.org/article/MED/)([0-9]+)', content, re.I))
+    if len(dois) > 1 or len(pmids) > 1:
+        raise Hold("ambiguous_source")
+    if not dois and not pmids:
+        raise Hold("unlinked_secondary")
+    return next(iter(pmids), ""), next(iter(dois), "")
+
+
+def verify_source(material):
+    payload = material.get("raw_payload")
+    if not isinstance(payload, dict) or material.get("content_scope") not in ("abstract", "feed_excerpt"):
+        raise Hold("insufficient_content")
+    original = payload.get("record")
+    research = payload.get("provider") == "europepmc"
+    if research:
+        if not isinstance(original, dict) or original.get("source") != "MED" or not re.fullmatch(r"[0-9]+", str(original.get("id", ""))):
+            raise Hold("invalid_source_identity")
+        pmid, doi = str(original["id"]), doi_value(original.get("doi"))
+    elif payload.get("provider") == "rss":
+        pmid, doi = secondary_identifiers(original)
+    else:
+        raise Hold("unverified_provider")
+    terms = ["SRC:MED"]
+    if pmid:
+        terms.append(f"EXT_ID:{pmid}")
+    if doi:
+        terms.append(f'DOI:"{doi}"')
+    request_url = API + "?" + urllib.parse.urlencode({"query": " AND ".join(terms), "format": "json", "resultType": "core", "pageSize": 2})
+    try:
+        data = json.loads(fetch(request_url))
+        records = data["resultList"]["result"]
+    except Exception as error:
+        raise Failure("source_unavailable") from error
+    if not isinstance(records, list) or len(records) != 1 or data.get("hitCount", 1) != 1:
+        raise Hold("ambiguous_source")
+    record = records[0]
+    if not isinstance(record, dict) or record.get("source") != "MED" or not re.fullmatch(r"[0-9]+", str(record.get("id", ""))):
+        raise Hold("invalid_source_identity")
+    verified_doi = doi_value(record.get("doi"))
+    if (pmid and str(record["id"]) != pmid) or (doi and verified_doi != doi):
+        raise Hold("source_mismatch")
+    try:
+        title, abstract = plain_text(record.get("title")), plain_text(record.get("abstractText"))
+    except ValueError:
+        raise Hold("invalid_source_metadata") from None
+    if research and (normal(title) != normal(plain_text(original.get("title"))) or
+                     normal(abstract) != normal(plain_text(original.get("abstractText")))):
+        raise Hold("source_changed")
+    type_list = record.get("pubTypeList")
+    types = type_list.get("pubType", []) if isinstance(type_list, dict) else []
+    if not isinstance(types, list) or not types or any(not isinstance(t, str) for t in types):
+        raise Hold("unknown_publication_status")
+    type_text = " ".join(types).lower()
+    if any(word in type_text for word in ("retract", "erratum", "correct", "preprint", "withdraw", "concern", "review", "meta-analysis")) or record.get("commentCorrectionList"):
+        raise Hold("publication_requires_review")
+    if "journal article" not in type_text or record.get("publicationStatus") not in ("ppublish", "epublish", "aheadofprint", "published"):
+        raise Hold("unknown_publication_status")
+    if record.get("language") not in ("eng", "rus"):
+        raise Hold("unsupported_language")
+    if not title or len(abstract.split()) < 100 or len(abstract) > 20000:
+        raise Hold("insufficient_content")
+    if not DOG_WORDS.search(title) or not TOPIC_WORDS.search(title + " " + abstract):
+        raise Hold("outside_pilot")
+    if RISK.search(title + " " + abstract):
+        raise Hold("risk_requires_review")
+    if INJECTION.search(title + " " + abstract):
+        raise Hold("untrusted_source_instructions")
+    journal_info = record.get("journalInfo") or {}
+    journal = journal_info.get("journal") or {} if isinstance(journal_info, dict) else {}
+    if not isinstance(journal, dict) or any(not isinstance(value, str) for value in
+            (record.get("authorString", ""), record.get("pubYear", ""), journal.get("title", ""))):
+        raise Hold("invalid_source_metadata")
+    return {"source_id": "MED:" + str(record["id"]),
+            "evidence_key": "doi:" + verified_doi if verified_doi else "MED:" + str(record["id"]),
+            "doi": verified_doi, "title": title, "abstract": abstract,
+            "url": f"https://europepmc.org/article/MED/{record['id']}",
+            "authors": record.get("authorString") or "", "journal": journal.get("title") or "",
+            "year": record.get("pubYear") or "", "request_url": request_url,
+            "evidence_scope": "abstract"}
+
+
+def require_keys(value, keys):
+    if not isinstance(value, dict) or set(value) != set(keys):
+        raise Hold("invalid_model_contract")
+
+
+def text_field(value, minimum=1, maximum=5000):
+    if not isinstance(value, str) or not minimum <= len(value.strip()) <= maximum or '\x00' in value:
+        raise Hold("invalid_model_contract")
+    return value.strip()
+
+
+def validate_draft(draft, evidence):
+    require_keys(draft, ("about_dogs", "topic", "format", "risk", "headline", "paragraphs", "limitations",
+                         "claims", "needs_full_text", "contains_practical_advice"))
+    if draft["about_dogs"] is not True or draft["risk"] != "low" or draft["needs_full_text"] is not False or draft["contains_practical_advice"] is not False:
+        raise Hold("draft_not_eligible")
+    if not isinstance(draft["topic"], str) or not isinstance(draft["format"], str) or draft["topic"] not in TOPICS or draft["format"] not in FORMATS:
+        raise Hold("outside_pilot")
+    headline = text_field(draft["headline"], 8, 140)
+    limitations = text_field(draft["limitations"], 40, 1500)
+    if not isinstance(draft["paragraphs"], list) or not 2 <= len(draft["paragraphs"]) <= 4:
+        raise Hold("invalid_model_contract")
+    if not isinstance(draft["claims"], list) or not 1 <= len(draft["claims"]) <= 6:
+        raise Hold("invalid_model_contract")
+    claim_ids = set()
+    for claim in draft["claims"]:
+        require_keys(claim, ("id", "text", "quote", "source_id"))
+        identifier = text_field(claim["id"], 1, 20)
+        if not re.fullmatch(r"c[1-6]", identifier) or identifier in claim_ids or claim["source_id"] != evidence["source_id"]:
+            raise Hold("unverified_claim")
+        claim_ids.add(identifier)
+        text_field(claim["text"], 10, 1000)
+        quote = text_field(claim["quote"], 15, 1200)
+        if len(quote.split()) < 4 or normal(quote) not in normal(evidence["abstract"]):
+            raise Hold("unverified_claim")
+    paragraphs = []
+    used_ids = set()
+    for paragraph in draft["paragraphs"]:
+        require_keys(paragraph, ("kind", "text", "claim_ids"))
+        refs = paragraph["claim_ids"]
+        if paragraph["kind"] not in ("result", "interpretation") or not isinstance(refs, list) or not refs or any(not isinstance(r, str) or r not in claim_ids for r in refs):
+            raise Hold("unverified_claim")
+        used_ids.update(refs)
+        paragraphs.append(text_field(paragraph["text"], 20, 2500))
+    if used_ids != claim_ids or not 120 <= len(" ".join(paragraphs).split()) <= 220:
+        raise Hold("invalid_article_length")
+    public_text = " ".join([headline, *paragraphs, limitations])
+    if RISK.search(public_text) or INSTRUCTIONS.search(public_text) or OVERCLAIM.search(public_text) or INJECTION.search(public_text):
+        raise Hold("risk_requires_review")
+    if 'http' in public_text.lower() or re.search(r'<\s*/?\s*(?:script|iframe|img|a)\b', public_text, re.I):
+        raise Hold("unverified_link")
+    cyrillic = len(re.findall(r'[а-яё]', public_text, re.I))
+    if cyrillic < len(re.findall(r'[a-zа-яё]', public_text, re.I)) / 2:
+        raise Hold("not_russian")
+    allowed_numbers = set(re.findall(r'\d+', evidence["abstract"] + " " + evidence["title"] + " " + str(evidence["year"])))
+    if set(re.findall(r'\d+', public_text)) - allowed_numbers:
+        raise Hold("unverified_number")
+    if not re.search(r'аннотаци|реферат', limitations, re.I):
+        raise Hold("missing_evidence_scope")
+
+
+def validate_review(review, draft):
+    require_keys(review, ("approved", "risk", "about_dogs", "topic", "all_claims_supported", "no_practical_advice",
+                          "limitations_adequate", "no_overclaim", "source_sufficient", "reasons"))
+    flags = ("approved", "about_dogs", "all_claims_supported", "no_practical_advice", "limitations_adequate", "no_overclaim", "source_sufficient")
+    if any(review[key] is not True for key in flags) or review["risk"] != "low" or review["topic"] != draft["topic"]:
+        raise Hold("review_not_approved")
+    if not isinstance(review["reasons"], list) or review["reasons"]:
+        raise Hold("review_not_approved")
+
+
+def publication_payload(draft, evidence):
+    return {"version": 1, "evidence_key": evidence["evidence_key"], "topic": draft["topic"], "format": draft["format"],
+            "paragraphs": [{"kind": p["kind"], "text": p["text"]} for p in draft["paragraphs"]],
+            "limitations": draft["limitations"], "evidence_scope": "abstract",
+            "citations": [{key: str(evidence.get(key) or "") for key in ("title", "authors", "journal", "year", "doi", "url")}]}

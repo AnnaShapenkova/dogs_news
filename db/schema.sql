@@ -54,6 +54,16 @@ CREATE TABLE IF NOT EXISTS findings (
 
 -- the bot marks a finding when it has been sent to subscribers
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS publication_payload JSONB NOT NULL DEFAULT '{}'
+    CHECK (jsonb_typeof(publication_payload) = 'object');
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS editorial_result JSONB;
+
+-- A popular article and its research record must not publish the same evidence twice.
+CREATE UNIQUE INDEX IF NOT EXISTS findings_published_evidence_key
+    ON findings ((publication_payload->>'evidence_key'))
+    WHERE publication_status = 'published' AND publication_payload ? 'evidence_key';
+
 CREATE TABLE IF NOT EXISTS subscribers (
     chat_id     BIGINT PRIMARY KEY,
     name        TEXT,
