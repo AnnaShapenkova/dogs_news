@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS findings (
     summary         TEXT NOT NULL,
     model           TEXT NOT NULL,
     prompt_version  TEXT NOT NULL,
+    publication_status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (publication_status IN ('draft', 'published')),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

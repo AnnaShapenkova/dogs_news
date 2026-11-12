@@ -106,7 +106,8 @@ def setup(conn):
     # before the first subscriber, old findings count as sent: the bot pushes only what comes later
     if not conn.execute("SELECT 1 FROM subscribers LIMIT 1").fetchone():
         marked = conn.execute(
-            "UPDATE findings SET sent_at = now() WHERE sent_at IS NULL"
+            "UPDATE findings SET sent_at = now()"
+            " WHERE sent_at IS NULL AND publication_status = 'published'"
         ).rowcount
         if marked:
             db.log(
@@ -128,18 +129,23 @@ def send_new(conn):
     if busy:
         return
     subscribers = [row[0] for row in conn.execute("SELECT chat_id FROM subscribers")]
-    ids = [row[0] for row in conn.execute("SELECT id FROM findings WHERE sent_at IS NULL")]
+    ids = [
+        row[0] for row in conn.execute(
+            "SELECT id FROM findings WHERE sent_at IS NULL AND publication_status = 'published'"
+        )
+    ]
     if not subscribers or not ids:
         return
     companies = conn.execute(
-        "SELECT coalesce(entity, 'без компании'), count(*) FROM findings WHERE id = ANY(%s)"
+        "SELECT coalesce(entity, 'без компании'), count(*) FROM findings"
+        " WHERE id = ANY(%s) AND publication_status = 'published'"
         " GROUP BY entity ORDER BY entity IS NULL, count(*) DESC",
         (ids,),
     ).fetchall()
     latest = conn.execute(
         "SELECT f.summary, f.entity, m.url, s.name FROM findings f"
         " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
-        " WHERE f.id = ANY(%s) ORDER BY f.id DESC LIMIT %s",
+        " WHERE f.id = ANY(%s) AND f.publication_status = 'published' ORDER BY f.id DESC LIMIT %s",
         (ids, LATEST),
     ).fetchall()
     text = f"<b>Новых находок: {len(ids)}</b>\n" + " · ".join(f"{html.escape(name)} {count}" for name, count in companies)
@@ -156,7 +162,10 @@ def send_new(conn):
             if error.code == 403:  # the person blocked the bot
                 conn.execute("DELETE FROM subscribers WHERE chat_id = %s", (chat_id,))
             db.log(SERVICE, f"чат {chat_id}: не доставлено, ответ {error.code}")
-    conn.execute("UPDATE findings SET sent_at = now() WHERE id = ANY(%s)", (ids,))
+    conn.execute(
+        "UPDATE findings SET sent_at = now() WHERE id = ANY(%s) AND publication_status = 'published'",
+        (ids,),
+    )
     db.finish_run(conn, SERVICE, run_id, len(ids), f"сводка по {len(ids)} находкам, получили {delivered} из {len(subscribers)}")
 
 
@@ -179,7 +188,8 @@ def status_text(conn):
         else:
             lines.append(f"{name}: еще не было")
     findings, subscribers = conn.execute(
-        "SELECT (SELECT count(*) FROM findings), (SELECT count(*) FROM subscribers)"
+        "SELECT (SELECT count(*) FROM findings WHERE publication_status = 'published'),"
+        " (SELECT count(*) FROM subscribers)"
     ).fetchone()
     lines.append(f"\nВсего находок {findings}, подписчиков {subscribers}.")
     return "\n".join(lines)
@@ -199,7 +209,8 @@ def handle(conn, message):
         )
         latest = conn.execute(
             "SELECT f.summary, f.entity, m.url, s.name FROM findings f"
-            " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id ORDER BY f.id DESC LIMIT 5"
+            " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
+            " WHERE f.publication_status = 'published' ORDER BY f.id DESC LIMIT 5"
         ).fetchall()
         text = "Готово, вы подписаны. После каждого сбора пришлю сюда одну сводку: сколько новых находок и по каким компаниям."
         if latest:
@@ -284,6 +295,7 @@ def page_data(conn):
         "SELECT f.id, m.id, f.summary, f.entity, m.title, m.url, coalesce(m.published_at, m.collected_at), m.run_id,"
         " s.id, s.name, s.url, left(m.text, 600), f.sent_at, f.model"
         " FROM findings f JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
+        " WHERE f.publication_status = 'published'"
         " ORDER BY f.id DESC LIMIT 300"
     ):
         finding = dict(zip(fields, row))
@@ -307,12 +319,13 @@ def page_data(conn):
         )
         added = sum(statuses.values())
         kept = conn.execute(
-            "SELECT count(*) FROM findings f JOIN materials m ON m.id = f.material_id WHERE m.run_id = %s",
+            "SELECT count(*) FROM findings f JOIN materials m ON m.id = f.material_id"
+            " WHERE m.run_id = %s AND f.publication_status = 'published'",
             (run[0],),
         ).fetchone()[0]
         sent = conn.execute(
             "SELECT count(*) FROM findings f JOIN materials m ON m.id = f.material_id"
-            " WHERE m.run_id = %s AND f.sent_at IS NOT NULL",
+            " WHERE m.run_id = %s AND f.sent_at IS NOT NULL AND f.publication_status = 'published'",
             (run[0],),
         ).fetchone()[0]
         run_info = {
@@ -342,7 +355,8 @@ def page_data(conn):
             ("sources", "materials", "findings", "runs", "subscribers"),
             conn.execute(
                 "SELECT (SELECT count(*) FROM sources WHERE active), (SELECT count(*) FROM materials),"
-                " (SELECT count(*) FROM findings), (SELECT count(*) FROM runs), (SELECT count(*) FROM subscribers)"
+                " (SELECT count(*) FROM findings WHERE publication_status = 'published'),"
+                " (SELECT count(*) FROM runs), (SELECT count(*) FROM subscribers)"
             ).fetchone(),
         )
     )

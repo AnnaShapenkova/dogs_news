@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .venv/
+.tools/
+/PUSH-TO-GITHUB.cmd
+/PUSH-DOGS-NEWS.bat
+/PUSH-DOGS-NEWS.log

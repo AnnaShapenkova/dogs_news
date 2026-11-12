@@ -6,3 +6,7 @@ __pycache__
 .DS_Store
 props
 db/.ruff_cache
+.tools
+PUSH-TO-GITHUB.cmd
+PUSH-DOGS-NEWS.bat
+PUSH-DOGS-NEWS.log

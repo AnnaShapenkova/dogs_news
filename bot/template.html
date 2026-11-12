@@ -207,7 +207,7 @@ function renderFilters() {
 /* ---------- feed ---------- */
 function renderFeed() {
   if (!findings.length) {
-    return `<div class="empty"><p>Находок пока нет.</p><p class="label">Они появятся после ближайшего сбора и разбора моделью</p></div>`;
+    return `<div class="empty"><p>Опубликованных находок пока нет.</p><p class="label">Здесь появятся материалы после допуска к публикации</p></div>`;
   }
   const list = visible();
   if (!list.length) {
@@ -286,11 +286,11 @@ function renderHow() {
       say: `В базе Postgres сейчас ${t.materials} ${plural(t.materials, "материал", "материала", "материалов")}. Повторы она не пускает.`,
       more: `У ссылки в таблице <code>materials</code> стоит правило <code>UNIQUE</code>: одна ссылка не попадет в базу дважды. Каждый материал знает свой источник (<code>source_id</code>) и прогон сбора (<code>run_id</code>).` },
     { verb: "Разобрал", metric: `<mark>${r.kept}</mark>`,
-      say: `Модель посмотрела ${r.processed} ${plural(r.processed, "материал", "материала", "материалов")}: ${r.kept} ${plural(r.kept, "стал находкой", "стали находками", "стали находками")}, ${r.skipped} не про AI${r.failed ? `, ${r.failed} не разобрано` : ""}${r.waiting ? `, ${r.waiting} ждут очереди` : ""}.`,
-      more: `Это единственное место системы, где работает модель: <code>worker/main.py</code>. Она решает, про AI ли материал, пишет одну фразу и выбирает компанию из списка <code>ENTITIES</code>. Находка ложится в таблицу <code>findings</code> со ссылкой на материал.` },
+      say: `Обработано ${r.processed} ${plural(r.processed, "материал", "материала", "материалов")}. Допущено к публикации: ${r.kept}. Пропущено как не про AI: ${r.skipped}${r.failed ? `, ${r.failed} не разобрано` : ""}${r.waiting ? `, ${r.waiting} ждут очереди` : ""}.`,
+      more: `Модель работает в <code>worker/main.py</code>: определяет, про AI ли материал, пишет одну фразу и выбирает компанию. Результат сохраняется в <code>findings</code> как скрытый черновик. Только статус <code>published</code> разрешает показ читателям; обработка сама по себе не означает публикацию.` },
     { verb: "Отправил", metric: r.sent,
       say: r.sent ? `Бот прислал ${r.sent} ${plural(r.sent, "находку", "находки", "находок")} подписчикам: их ${t.subscribers}.` : `Из этого сбора бот еще ничего не рассылал. Подписчиков: ${t.subscribers}.`,
-      more: `Когда модель разобрала весь сбор, бот присылает одну сводку всем из таблицы <code>subscribers</code> и ставит находкам отметку <code>sent_at</code>. Поэтому одна находка не придет дважды. Код: <code>bot/main.py</code>.` },
+      more: `Когда обработка сбора завершена, бот включает в сводку только опубликованные находки и ставит им отметку <code>sent_at</code>. Черновики в рассылку не попадают. Код: <code>bot/main.py</code>.` },
   ];
   const fin = (r.finished_at || "").slice(0, 16).replace("T", " ");
   return `<div class="how">

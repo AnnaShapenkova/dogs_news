@@ -58,7 +58,8 @@ ROW = '<tr><td>{date}</td><td>{source}</td><td>{entity}</td><td><a href="{url}" 
 
 def render(conn):
     sources, materials, findings = conn.execute(
-        "SELECT (SELECT count(*) FROM sources), (SELECT count(*) FROM materials), (SELECT count(*) FROM findings)"
+        "SELECT (SELECT count(*) FROM sources), (SELECT count(*) FROM materials),"
+        " (SELECT count(*) FROM findings WHERE publication_status = 'published')"
     ).fetchone()
     last = conn.execute(
         "SELECT status, started_at FROM runs WHERE service = 'collector' ORDER BY id DESC LIMIT 1"
@@ -69,6 +70,7 @@ def render(conn):
            FROM findings f
            JOIN materials m ON m.id = f.material_id
            JOIN sources s ON s.id = m.source_id
+           WHERE f.publication_status = 'published'
            ORDER BY m.published_at DESC NULLS LAST LIMIT 100"""
     ).fetchall()
     rows_html = (
