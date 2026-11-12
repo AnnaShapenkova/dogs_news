@@ -8,7 +8,7 @@
 CREATE TABLE IF NOT EXISTS sources (
     id          SERIAL PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
-    kind        TEXT NOT NULL,            -- hn | arxiv | rss
+    kind        TEXT NOT NULL,            -- europepmc | rss (legacy kinds retained)
     url         TEXT NOT NULL,
     active      BOOLEAN NOT NULL DEFAULT TRUE
 );
@@ -32,8 +32,13 @@ CREATE TABLE IF NOT EXISTS materials (
     text          TEXT,
     published_at  TIMESTAMPTZ,
     collected_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    status        TEXT NOT NULL DEFAULT 'new'   -- new | done | skipped | failed
+    status        TEXT NOT NULL DEFAULT 'new'   -- collected | new | done | skipped | failed
 );
+
+-- Safe for existing T01 databases. Original text and statuses are preserved.
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS raw_payload JSONB;
+ALTER TABLE materials ADD COLUMN IF NOT EXISTS content_scope TEXT NOT NULL DEFAULT 'legacy_unknown'
+    CHECK (content_scope IN ('abstract', 'feed_excerpt', 'metadata_only', 'legacy_unknown'));
 
 CREATE TABLE IF NOT EXISTS findings (
     id              SERIAL PRIMARY KEY,
@@ -49,17 +54,22 @@ CREATE TABLE IF NOT EXISTS findings (
 
 -- the bot marks a finding when it has been sent to subscribers
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
-
 CREATE TABLE IF NOT EXISTS subscribers (
     chat_id     BIGINT PRIMARY KEY,
     name        TEXT,
     started_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Retire only the five original URLs; do not delete their records or materials.
+UPDATE sources SET active = FALSE WHERE url IN (
+    'https://hn.algolia.com/api/v1/search_by_date?query=AI&tags=story&hitsPerPage=15',
+    'https://hn.algolia.com/api/v1/search_by_date?query=Anthropic&tags=story&hitsPerPage=15',
+    'https://hn.algolia.com/api/v1/search_by_date?query=OpenAI&tags=story&hitsPerPage=15',
+    'https://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=10',
+    'https://habr.com/ru/rss/hubs/artificial_intelligence/articles/'
+);
+
 INSERT INTO sources (name, kind, url) VALUES
-    ('Hacker News', 'hn',    'https://hn.algolia.com/api/v1/search_by_date?query=AI&tags=story&hitsPerPage=15'),
-    ('Hacker News: Anthropic', 'hn', 'https://hn.algolia.com/api/v1/search_by_date?query=Anthropic&tags=story&hitsPerPage=15'),
-    ('Hacker News: OpenAI',    'hn', 'https://hn.algolia.com/api/v1/search_by_date?query=OpenAI&tags=story&hitsPerPage=15'),
-    ('arXiv cs.AI', 'arxiv', 'https://export.arxiv.org/api/query?search_query=cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=10'),
-    ('Хабр: ИИ',    'rss',   'https://habr.com/ru/rss/hubs/artificial_intelligence/articles/')
+    ('Europe PMC: Dogs pilot', 'europepmc', 'https://www.ebi.ac.uk/europepmc/webservices/rest/search'),
+    ('ScienceDaily: Dogs', 'rss', 'https://www.sciencedaily.com/rss/plants_animals/dogs.xml')
 ON CONFLICT (name) DO NOTHING;

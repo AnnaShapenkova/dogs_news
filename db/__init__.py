@@ -20,7 +20,8 @@ def init_schema(conn):
     # blocks start at the same time on a fresh database; the lock lets one create the tables
     conn.execute("SELECT pg_advisory_lock(%s)", (SCHEMA_LOCK,))
     try:
-        conn.execute(SCHEMA.read_text())
+        with conn.transaction():
+            conn.execute(SCHEMA.read_text(encoding="utf-8"))
     finally:
         conn.execute("SELECT pg_advisory_unlock(%s)", (SCHEMA_LOCK,))
 
