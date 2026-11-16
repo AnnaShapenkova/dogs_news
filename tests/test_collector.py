@@ -51,7 +51,7 @@ def rss(*items):
 class ReaderTests(unittest.TestCase):
     def read_api(self, records):
         with patch.object(collector, 'fetch', return_value=api_page(records)):
-            return collector.read_europepmc(API_URL, TODAY)
+            return collector.read_europepmc(API_URL, TODAY, include_archive=False)
 
     def test_full_abstract_and_original_metadata_are_preserved(self):
         item = record(abstractText='<p>' + 'Dogs learn. ' * 200 + '</p>',
@@ -137,10 +137,10 @@ class ReaderTests(unittest.TestCase):
         self.assertTrue(batch.read_ok)
         self.assertEqual(len(batch.items), 1)
         self.assertIn('unavailable', batch.error)
-        pages = [api_page([record(i)], nextCursorMark=f'page{i + 1}') for i in range(3)]
+        pages = [api_page([record(i)], nextCursorMark=f'page{i + 1}') for i in range(10)]
         with patch.object(collector, 'fetch', side_effect=pages) as fetch:
             batch = collector.read_europepmc(API_URL, TODAY)
-        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(fetch.call_count, 10)
         self.assertTrue(batch.limited)
 
     def test_rss_item_budget(self):
@@ -312,6 +312,26 @@ class CollectorDatabaseTests(unittest.TestCase):
         with patch.object(collector, 'fetch') as fetch:
             self.assertEqual(collector.collect(self.conn, TODAY), 0)
             fetch.assert_not_called()
+
+    def test_archive_limit_preserves_dates_and_original_snapshots(self):
+        self.init()
+        from urllib.parse import parse_qs, urlsplit
+        def fetch(url):
+            if not url.startswith(API_URL):
+                return rss()
+            query = parse_qs(urlsplit(url).query)['query'][0]
+            if 'TO 2026-11-12]' in query:
+                return api_page([record(i) for i in range(1, 11)])
+            return api_page([record(i, firstPublicationDate='2023-05-01') for i in range(20, 30)])
+        with patch.object(collector, 'fetch', side_effect=fetch):
+            self.assertEqual(collector.collect(self.conn, TODAY), 15)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM materials WHERE raw_payload->>'discovery_window'='evergreen'").fetchone()[0], 5)
+        self.assertEqual(self.conn.execute("SELECT DISTINCT published_at::date FROM materials WHERE raw_payload->>'discovery_window'='evergreen'").fetchall(), [(date(2023, 5, 1),)])
+        before = self.conn.execute('SELECT id,text,raw_payload,collected_at FROM materials ORDER BY id').fetchall()
+        with patch.object(collector, 'fetch', side_effect=fetch):
+            collector.collect(self.conn, TODAY)
+        for row in before:
+            self.assertEqual(self.conn.execute('SELECT id,text,raw_payload,collected_at FROM materials WHERE id=%s', (row[0],)).fetchone(), row)
 
 
 class AllocationTests(unittest.TestCase):

@@ -6,11 +6,12 @@ import re
 import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
+from datetime import date, datetime, timedelta, timezone
 
 from collector.main import fetch, plain_text, DOG_WORDS, TOPIC_WORDS
 from publication import TOPICS, FORMATS
 
-RULES_VERSION = "dogs-pilot-v2"
+RULES_VERSION = "dogs-pilot-v3"
 API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 RISK = re.compile(
     r"\b(?:aggress\w*|bit(?:e|es|ing)|aversive|punish\w*|shock|chok\w*|dos(?:e|es|age)|"
@@ -26,6 +27,18 @@ INSTRUCTIONS = re.compile(
 OVERCLAIM = re.compile(r"\b(?:доказали|гарантиру[а-яё]*|всегда|все собаки|консенсус|безусловно|proves|guarantee\w*|all dogs|always)\b", re.I)
 INJECTION = re.compile(r"(?:ignore (?:all |previous )?instructions|system prompt|игнорируй[а-яё]* (?:все |предыдущие )?инструкц|раскрой[а-яё]* (?:ключ|токен))", re.I)
 DOI = re.compile(r"10\.\d{4,9}/[^\s<>\"?#]+", re.I)
+SAFE_NEGATION = re.compile(
+    r"\bне\s+(?:всегда|все\s+собаки|доказали|гарантиру[а-яё]*)\b|\bnot\s+(?:always|all\s+dogs)\b", re.I)
+LOGICAL_INFERENCE = re.compile(
+    r"\bиз\s+(?:этого|результат[а-яё]*|данн[а-яё]*|наблюден[а-яё]*|исследован[а-яё]*)\s+"
+    r"следует(?=\s*,?\s*(?:что|вывод|предположение|заключение)\b)", re.I)
+
+
+def policy_signals(text):
+    # Exempt only the local safe phrase, never an entire sentence or paragraph.
+    contextual = LOGICAL_INFERENCE.sub(' ', SAFE_NEGATION.sub(' ', text))
+    return sorted({m.group(0).lower() for regex in (INSTRUCTIONS, OVERCLAIM, INJECTION)
+                   for m in regex.finditer(contextual)})
 
 
 class Hold(Exception):
@@ -150,13 +163,26 @@ def verify_source(material):
     if not isinstance(journal, dict) or any(not isinstance(value, str) for value in
             (record.get("authorString", ""), record.get("pubYear", ""), journal.get("title", ""))):
         raise Hold("invalid_source_metadata")
+    research_date = record.get('firstPublicationDate', '')
+    if research_date:
+        try:
+            research_date = date.fromisoformat(research_date).isoformat()
+            if date.fromisoformat(research_date) > datetime.now(timezone.utc).date():
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise Hold('invalid_source_metadata') from None
+    elif payload.get('discovery_window') == 'evergreen':
+        raise Hold('invalid_source_metadata')
     return {"source_id": "MED:" + str(record["id"]),
             "evidence_key": "doi:" + verified_doi if verified_doi else "MED:" + str(record["id"]),
             "doi": verified_doi, "title": title, "abstract": abstract,
             "url": f"https://europepmc.org/article/MED/{record['id']}",
             "authors": record.get("authorString") or "", "journal": journal.get("title") or "",
             "year": record.get("pubYear") or "", "request_url": request_url,
-            "evidence_scope": "abstract", "risk_signals": risk_signals(title + " " + abstract)}
+            "evidence_scope": "abstract", "risk_signals": risk_signals(title + " " + abstract),
+            "research_date": research_date,
+            "is_evergreen": bool(research_date and date.fromisoformat(research_date) <
+                                 datetime.now(timezone.utc).date() - timedelta(days=89))}
 
 
 def require_keys(value, keys):
@@ -179,7 +205,7 @@ def validate_draft(draft, evidence):
         raise Hold("outside_pilot")
     headline = text_field(draft["headline"], 8, 140)
     limitations = text_field(draft["limitations"], 40, 1500)
-    if not isinstance(draft["paragraphs"], list) or not 2 <= len(draft["paragraphs"]) <= 4:
+    if not isinstance(draft["paragraphs"], list) or not 1 <= len(draft["paragraphs"]) <= 4:
         raise Hold("invalid_model_contract")
     if not isinstance(draft["claims"], list) or not 1 <= len(draft["claims"]) <= 6:
         raise Hold("invalid_model_contract")
@@ -203,10 +229,14 @@ def validate_draft(draft, evidence):
             raise Hold("unverified_claim")
         used_ids.update(refs)
         paragraphs.append(text_field(paragraph["text"], 20, 2500))
-    if used_ids != claim_ids or not 120 <= len(" ".join(paragraphs).split()) <= 220:
+    if used_ids != claim_ids or not 80 <= len(" ".join(paragraphs).split()) <= 220:
         raise Hold("invalid_article_length")
     public_text = " ".join([headline, *paragraphs, limitations])
-    if INSTRUCTIONS.search(public_text) or OVERCLAIM.search(public_text) or INJECTION.search(public_text):
+    if evidence.get('is_evergreen') and re.search(
+            r'\b(?:нов[а-яё]*\s+(?:исследован[а-яё]*|открыти[а-яё]*|новост[а-яё]*)|свеж[а-яё]*\s+(?:исследован[а-яё]*|новост[а-яё]*))\b',
+            public_text, re.I):
+        raise Hold('evergreen_as_news')
+    if policy_signals(public_text):
         raise Hold("risk_requires_review")
     if 'http' in public_text.lower() or re.search(r'<\s*/?\s*(?:script|iframe|img|a)\b', public_text, re.I):
         raise Hold("unverified_link")
@@ -231,7 +261,9 @@ def validate_review(review, draft):
 
 
 def publication_payload(draft, evidence):
-    return {"version": 1, "evidence_key": evidence["evidence_key"], "topic": draft["topic"], "format": draft["format"],
+    return {"version": 1, "evidence_key": evidence["evidence_key"], "topic": draft["topic"],
+            "format": "explainer" if evidence.get('is_evergreen') else draft["format"],
+            "research_date": evidence.get('research_date', ''), "is_evergreen": evidence.get('is_evergreen', False),
             "paragraphs": [{"kind": p["kind"], "text": p["text"]} for p in draft["paragraphs"]],
             "limitations": draft["limitations"], "evidence_scope": "abstract",
             "citations": [{key: str(evidence.get(key) or "") for key in ("title", "authors", "journal", "year", "doi", "url")}]}

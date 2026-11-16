@@ -358,6 +358,23 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.assertEqual(bot.page_data(self.conn)['findings'], [])
         self.assertEqual(self.count_runs('worker_model_call'), 1)
 
+    def test_evergreen_publication_is_labelled_in_mini_app_start_and_delivery(self):
+        mid = self.candidate()
+        record = self.records[999999991]
+        record['firstPublicationDate'] = '2023-05-01'
+        self.conn.execute('UPDATE materials SET raw_payload=%s WHERE id=%s',
+                          (Jsonb({'provider': 'europepmc', 'record': record, 'discovery_window': 'evergreen'}), mid))
+        self.assertEqual(worker.process_new(self.conn), 1)
+        article = bot.page_data(self.conn)['findings'][0]['article']
+        self.assertEqual(article['format'], 'explainer')
+        self.assertIn('2023-05-01', article['context_note'])
+        bot.handle(self.conn, {'chat': {'id': 42, 'type': 'private'}, 'text': '/start'})
+        self.assertIn('Познавательный разбор', self.messages()[0])
+        self.telegram.reset_mock()
+        bot.send_new(self.conn)
+        self.assertIn('исследование от 2023-05-01', self.messages()[0])
+        self.assertNotIn('Свежие:', self.messages()[0])
+
 
 if __name__ == '__main__':
     unittest.main()

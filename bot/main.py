@@ -82,12 +82,16 @@ def say(chat_id, text, button=True):
 
 def finding_lines(rows):
     lines = []
-    for summary, entity, url, source in rows:
+    for row in rows:
+        summary, entity, url, source = row[:4]
+        context = public_payload(row[4]).get('context_note', '') if len(row) > 4 else ''
         link = safe_url(url)
         heading = f'<a href="{html.escape(link)}">{html.escape(summary)}</a>' if link else html.escape(summary)
         line = f'• {heading}\n  {html.escape(source)}'
         if entity:
             line += f" · {html.escape(entity)}"
+        if context:
+            line += '\n  ' + html.escape(context)
         lines.append(line)
     return lines
 
@@ -139,14 +143,14 @@ def send_new(conn):
     if not subscribers or not ids:
         return
     latest = conn.execute(
-        "SELECT f.summary, f.publication_payload->>'topic', coalesce(f.publication_payload->'citations'->0->>'url',m.url), s.name FROM findings f"
+        "SELECT f.summary, f.publication_payload->>'topic', coalesce(f.publication_payload->'citations'->0->>'url',m.url), s.name, f.publication_payload FROM findings f"
         " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
         " WHERE f.id = ANY(%s) AND f.publication_status = 'published' ORDER BY f.id DESC LIMIT %s",
         (ids, LATEST),
     ).fetchall()
-    latest = [(summary, TOPICS.get(topic, ''), url, source) for summary, topic, url, source in latest]
+    latest = [(summary, TOPICS.get(topic, ''), url, source, payload) for summary, topic, url, source, payload in latest]
     text = f"<b>Новых находок: {len(ids)}</b>\nБлиже к собаке"
-    text += "\n\nСвежие:\n\n" + "\n\n".join(finding_lines(latest))
+    text += "\n\nПоследние публикации:\n\n" + "\n\n".join(finding_lines(latest))
     if len(ids) > LATEST:
         text += f"\n\nЕще {len(ids) - LATEST} в ленте."
     run_id = db.start_run(conn, SERVICE)
@@ -204,6 +208,7 @@ def status_text(conn):
         'model_unavailable_or_invalid_json': 'ошибка ответа модели', 'source_changed': 'содержание источника изменилось',
     }
     reason_names.update({
+        'evergreen_as_news': 'давнее исследование представлено новой новостью',
         'invalid_model_contract': 'ответ модели нарушает формат данных',
         'model_invalid_contract': 'модель вернула не объект JSON',
         'model_http_error': 'ошибка HTTP при обращении к модели',
@@ -236,11 +241,11 @@ def handle(conn, message):
             (chat["id"], name),
         )
         latest = conn.execute(
-            "SELECT f.summary, f.publication_payload->>'topic', coalesce(f.publication_payload->'citations'->0->>'url',m.url), s.name FROM findings f"
+            "SELECT f.summary, f.publication_payload->>'topic', coalesce(f.publication_payload->'citations'->0->>'url',m.url), s.name, f.publication_payload FROM findings f"
             " JOIN materials m ON m.id = f.material_id JOIN sources s ON s.id = m.source_id"
             " WHERE f.publication_status = 'published' ORDER BY f.id DESC LIMIT 5"
         ).fetchall()
-        latest = [(summary, TOPICS.get(topic, ''), url, source) for summary, topic, url, source in latest]
+        latest = [(summary, TOPICS.get(topic, ''), url, source, payload) for summary, topic, url, source, payload in latest]
         text = "Вы подписаны на «Ближе к собаке». Здесь будут проверенные объяснения исследований о поведении, обучении и благополучии собак."
         if latest:
             text += "\n\nПоследние:\n\n" + "\n\n".join(finding_lines(latest))

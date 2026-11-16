@@ -1,4 +1,6 @@
-# Проверки T01–T03 и T12
+# Проверки T01–T03, T12 и T13
+
+T13: полный `python -m unittest discover -s tests -p 'test_*.py' -q` — 103 теста: 65 пройдены, 38 PostgreSQL-тестов пропущены. `node tests/test_mini_app.js` — оба сценария пройдены, включая дату давнего исследования. Отчёт: [T13_RESULTS.md](T13_RESULTS.md). Дополнительные сценарии: test_t13.py, архив в test_collector.py и публикация/доставка архива в test_editorial_database.py. Это изолированные проверки с синтетическими источниками, не реальное качество научной редакции.
 
 T12: `python -m unittest discover -s tests -p 'test_*.py' -v` — 89 тестов: 53 пройдены, 36 PostgreSQL-тестов пропущены без TEST_DATABASE_URL. `node tests/test_mini_app.js` — оба сценария пройдены. Отчёт: [T12_RESULTS.md](T12_RESULTS.md). Ранее приведённые ниже количества относятся к историческим этапам. Новые проверки ответов модели и политики — test_t12.py; проверки явного повтора с историей и пути до Telegram — test_editorial_database.py. Все внешние вызовы подменены.
 

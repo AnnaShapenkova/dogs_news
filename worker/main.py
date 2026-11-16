@@ -17,7 +17,7 @@ from worker.budget import MAX_PUBLICATIONS, MAX_ATTEMPTS, MAX_MODEL_CALLS, budge
 
 SERVICE = "worker"
 MODEL = os.environ.get("MODEL", "anthropic/claude-haiku-5.5")
-PROMPT_VERSION = "dogs-v2"
+PROMPT_VERSION = "dogs-v3"
 POLL_SECONDS = 10
 WORKER_LOCK = 4208
 BUDGET_LOCK = 4210
@@ -44,12 +44,15 @@ needs_full_text=true; разрешение публиковать ты не вы
 "limitations":"отдельные ограничения; явно сказать, что доступна только аннотация",
 "claims":[{"id":"c1","text":"существенный вывод","quote":"ТОЧНЫЙ фрагмент аннотации, не менее 4 слов","source_id":"MED:..."}],
 "needs_full_text":false,"contains_practical_advice":false}
-Основной текст: 2–4 абзаца, суммарно 120–220 слов; limitations отдельно, минимум
+Основной текст: 1–4 абзаца, суммарно 80–220 слов; limitations отдельно, минимум
 40 символов. Все существенные выводы, включая заголовок и интерпретации, должны
 быть подтверждены. От 1 до 6 claims с уникальными id c1..c6. Каждый абзац ссылается
 на подтверждающие claims; все claims используются. Различай результаты и редакционную
 интерпретацию. Никаких URL в тексте: проверенные ссылки добавляет программа.
-Не пиши императивы/советы или фразы «все собаки», «всегда», «доказали», «гарантирует».
+Не пиши императивы/советы и не делай абсолютных обобщений. Безопасные отрицания
+«не всегда», «не все собаки», «не доказали» и логическое «из этого следует, что» допустимы.
+Если is_evergreen=true, это исследование прошлых лет: format=explainer,
+не называй его новым открытием, свежей новостью или прорывом.
 Числа только из источника. Не делай один ген объяснением сложного поведения.
 """
 
@@ -59,7 +62,9 @@ REVIEW_PROMPT = """Ты независимый этап проверки тек�
 покрывают ли цитаты ВСЕ существенные выводы, действительно ли подтверждают их смысл,
 нет ли выдуманных методов/чисел, чрезмерного обобщения, причинности или консенсуса.
 Проверь пригодность темы для обычных владельцев, низкий риск, явное ограничение
-уровнем аннотации и отсутствие практических предписаний. Упоминание агрессии, боли,
+уровнем аннотации и отсутствие практических предписаний. Текст может быть коротким:
+80–220 слов, 1–4 абзаца. Давнее исследование не представлять новой новостью:
+проверяй research_date и is_evergreen. Упоминание агрессии, боли,
 укусов или наказаний в описании результата само по себе не повод для отказа.
 Отдельно оцени смысл каждого утверждения и риск применения готового текста:
 советы по лечению, лекарствам, лечебным диетам, наказаниям, коррекции поведения
@@ -256,6 +261,9 @@ def process_one(conn, budget):
             draft = budget.model(mid, "draft", evidence)
             audit["draft"] = draft
             audit["draft_risk_signals"] = rules.risk_signals(json.dumps(draft, ensure_ascii=False))
+            public_text = ' '.join([str(draft.get('headline', '')), str(draft.get('limitations', '')),
+                                    *(str(p.get('text', '')) for p in draft.get('paragraphs', []) if isinstance(p, dict))]) if isinstance(draft, dict) and isinstance(draft.get('paragraphs'), list) else ''
+            audit['policy_signals'] = rules.policy_signals(public_text)
             rules.validate_draft(draft, evidence)
             review = budget.model(mid, "review", evidence, draft)
             audit["review"] = review

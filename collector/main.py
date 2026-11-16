@@ -21,7 +21,9 @@ LOOKBACK_DAYS = 90
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_RECORD_BYTES = 256 * 1024
 PAGE_SIZE = 15
-MAX_PAGES = 3
+MAX_PAGES = 10
+FRESH_PAGES = 7
+MAX_EVERGREEN = 5
 MAX_RSS_ITEMS = 60
 RESEARCH_SOURCE = "Europe PMC: Dogs pilot"
 ARTICLE_SOURCE = "ScienceDaily: Dogs"
@@ -74,6 +76,20 @@ class Batch:
     limited: bool = False
     read_ok: bool = False
     error: str | None = None
+    pages: int = 0
+    archive_scanned: int = 0
+
+
+def five_year_start(today):
+    try:
+        return today.replace(year=today.year - 5)
+    except ValueError:  # February 29 in a non-leap target year
+        return date(today.year - 5, 2, 28)
+
+
+def is_evergreen(item, today):
+    published = item.get('published_at')
+    return isinstance(published, datetime) and published.date() < today - timedelta(days=LOOKBACK_DAYS - 1)
 
 
 class TextOnly(HTMLParser):
@@ -150,7 +166,7 @@ def publication_date(value, rss=False):
         raise InvalidRecord("invalid_date") from None
 
 
-def candidate(title, text, url, published, payload, scope, today, research=False):
+def candidate(title, text, url, published, payload, scope, today, research=False, oldest=None, newest=None):
     try:
         raw_record = payload["record"]
         serialized = raw_record if isinstance(raw_record, str) else json.dumps(raw_record, ensure_ascii=False, allow_nan=False)
@@ -163,7 +179,7 @@ def candidate(title, text, url, published, payload, scope, today, research=False
         raise InvalidRecord("missing_title")
     if not valid_url(url):
         raise InvalidRecord("invalid_url")
-    if not today - timedelta(days=LOOKBACK_DAYS - 1) <= published.date() <= today:
+    if not (oldest or today - timedelta(days=LOOKBACK_DAYS - 1)) <= published.date() <= (newest or today):
         raise InvalidRecord("outside_window")
     combined = title + " " + text
     topic_text = NON_ANIMAL_TOPICS.sub(" ", combined)
@@ -173,18 +189,20 @@ def candidate(title, text, url, published, payload, scope, today, research=False
             "raw_payload": payload, "content_scope": scope if text else "metadata_only"}
 
 
-def read_europepmc(url, today):
+def read_europepmc_window(url, today, start, end, page_limit, window):
     batch = Batch()
     cursor = "*"
-    start = today - timedelta(days=LOOKBACK_DAYS - 1)
-    query = f"{EUROPEPMC_TERMS} AND FIRST_PDATE:[{start.isoformat()} TO {today.isoformat()}]"
+    query = f"{EUROPEPMC_TERMS} AND FIRST_PDATE:[{start.isoformat()} TO {end.isoformat()}]"
+    cursors = set()
     try:
-        for page in range(MAX_PAGES):
+        for page in range(page_limit):
+            cursors.add(cursor)
             parts = urllib.parse.urlsplit(url)
             params = dict(urllib.parse.parse_qsl(parts.query))
             params.update(query=query, format="json", resultType="core", pageSize=str(PAGE_SIZE),
                           sort="FIRST_PDATE_D desc", cursorMark=cursor)
             request_url = urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(params)))
+            batch.pages += 1
             data = json.loads(fetch(request_url))
             records = data["resultList"]["result"]
             if not isinstance(records, list) or len(records) > PAGE_SIZE or "errCode" in data:
@@ -197,24 +215,43 @@ def read_europepmc(url, today):
                         raise InvalidRecord("invalid_identifier")
                     if record.get("language") not in ("eng", "rus", None):
                         raise InvalidRecord("outside_language")
-                    payload = {"provider": "europepmc", "request_url": request_url,
+                    payload = {"provider": "europepmc", "request_url": request_url, "discovery_window": window,
                                "fetched_at": datetime.now(timezone.utc).isoformat(), "record": record}
                     batch.items.append(candidate(
                         record.get("title"), record.get("abstractText"),
                         f"https://europepmc.org/article/MED/{record['id']}",
-                        publication_date(record.get("firstPublicationDate")), payload, "abstract", today, research=True))
+                        publication_date(record.get("firstPublicationDate")), payload, "abstract", today,
+                        research=True, oldest=start, newest=end))
                 except InvalidRecord as error:
                     batch.rejected[str(error)] += 1
             next_cursor = data.get("nextCursorMark")
             if not records or not next_cursor:
                 break
-            if next_cursor == cursor or page == MAX_PAGES - 1:
+            if next_cursor in cursors or page == page_limit - 1:
                 batch.limited = True
                 break
             cursor = next_cursor
     except Exception as error:
         # Keep an already read page if a later page fails; expose the partial failure.
         batch.error = f"{type(error).__name__}: {error}"
+    return batch
+
+
+def read_europepmc(url, today, include_archive=True):
+    start = today - timedelta(days=LOOKBACK_DAYS - 1)
+    batch = read_europepmc_window(url, today, start, today,
+                                 FRESH_PAGES if include_archive else MAX_PAGES, 'fresh')
+    if include_archive and batch.read_ok and batch.pages < MAX_PAGES:
+        archive = read_europepmc_window(url, today, five_year_start(today), start - timedelta(days=1),
+                                       MAX_PAGES - batch.pages, 'evergreen')
+        batch.items.extend(archive.items)
+        batch.rejected.update(archive.rejected)
+        batch.scanned += archive.scanned
+        batch.archive_scanned = archive.scanned
+        batch.pages += archive.pages
+        batch.limited = batch.limited or archive.limited
+        if archive.error:
+            batch.error = (batch.error + '; ' if batch.error else '') + 'archive: ' + archive.error
     return batch
 
 
@@ -260,6 +297,7 @@ def collect(conn, today=None):
     today = today or utc_today()
     run_id = db.start_run(conn, SERVICE)
     total = 0
+    evergreen = 0
     try:
         sources = conn.execute(
             "SELECT id, name, kind, url FROM sources WHERE active AND name = ANY(%s) ORDER BY id",
@@ -269,14 +307,25 @@ def collect(conn, today=None):
         for source_id, name, kind, url in sources:
             reader = READERS.get(kind)
             batch = reader(url, today) if reader else Batch(error="unsupported_source_kind")
-            groups.append({"id": source_id, "name": name, "batch": batch, "queue": iter(batch.items), "new": 0, "duplicates": 0})
+            ordered = sorted(batch.items, key=lambda item: not is_evergreen(item, today))
+            groups.append({"id": source_id, "name": name, "batch": batch, "queue": iter(ordered),
+                           "new": 0, "duplicates": 0, "evergreen": 0, "archive_skipped": 0})
 
         def save_until(group, limit):
-            nonlocal total
+            nonlocal total, evergreen
+            if group['new'] >= limit or total >= MAX_NEW:
+                return
             for item in group["queue"]:
+                old = is_evergreen(item, today)
+                if old and evergreen >= MAX_EVERGREEN:
+                    group['archive_skipped'] += 1
+                    continue
                 if save_candidate(conn, group["id"], run_id, item):
                     total += 1
                     group["new"] += 1
+                    if old:
+                        evergreen += 1
+                        group['evergreen'] += 1
                     if group["new"] >= limit or total >= MAX_NEW:
                         break
                 else:
@@ -289,6 +338,7 @@ def collect(conn, today=None):
             if total < MAX_NEW:
                 save_until(group, group["new"] + MAX_NEW - total)
         notes = [f"новых кандидатов: {total}; ожидают тематической обработки (collected)"]
+        notes.append(f"познавательных исследований прошлых лет: {evergreen}/{MAX_EVERGREEN}")
         if total == MAX_NEW:
             notes.append("достигнут общий лимит 15 новых кандидатов")
         for group in groups:
@@ -296,7 +346,11 @@ def collect(conn, today=None):
             note = (f"{group['name']}: просмотрено {batch.scanned}, новых {group['new']},"
                     f" дублей {group['duplicates']}, пропуски {dict(batch.rejected)}")
             if batch.limited:
-                note += "; достигнут предел просмотра"
+                note += "; достигнут предел просмотра, диапазон может быть просмотрен не полностью"
+            if batch.pages:
+                note += f"; страниц {batch.pages}/{MAX_PAGES}, архивных записей просмотрено {batch.archive_scanned}"
+            if group['archive_skipped']:
+                note += f"; отложено по лимиту архива {group['archive_skipped']}"
             if batch.error:
                 note += f"; ошибка/частичный сбор: {batch.error}"
             notes.append(note)

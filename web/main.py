@@ -59,6 +59,8 @@ def article_html(summary, payload, url, published, source):
            f'<h2>{html.escape(summary)}</h2>']
     if article:
         out.append(f'<span class="tag">{html.escape(article["topic_label"])}</span>')
+        if article.get('context_note'):
+            out.append(f'<p class="muted">{html.escape(article["context_note"])}</p>')
         for paragraph in article['paragraphs']:
             kind = 'Результат исследования' if paragraph['kind'] == 'result' else 'Как это понимать'
             reference = html.escape(article['citations'][0]['url'], quote=True)

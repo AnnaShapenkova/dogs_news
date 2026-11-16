@@ -34,7 +34,8 @@ const published = {
   id: 1, summary: 'Как собаки выбирают изображения', title: 'Original title',
   date: '2026-11-12T12:00:00Z', source: 'Europe PMC', run_id: 1,
   url: 'https://europepmc.org/article/MED/999999991', reason: 'Обучение', topic: 'learning',
-  article: { format_label: 'Объяснение исследования',
+  article: { format_label: 'Познавательный разбор',
+    context_note: 'Познавательный разбор · исследование от 2023-05-01',
     paragraphs: [{ kind: 'result', text: '<script>unsafe()</script> Результат исследования.' },
                  { kind: 'interpretation', text: 'Осторожная интерпретация результата.' }],
     limitations: 'Разбор основан на аннотации; полный текст не проверен.',
@@ -61,6 +62,7 @@ const detail = fullNode('#view').innerHTML;
 assert.match(detail, /Что важно учитывать/);
 assert.match(detail, /Научный источник/);
 assert.match(detail, /полный текст не проверен/);
+assert.match(detail, /Познавательный разбор · исследование от 2023-05-01/);
 assert.match(detail, /&lt;script&gt;/);
 assert.doesNotMatch(detail, /<script>|entity =|material_id|source_id|prompt_version/);
 vm.runInContext('openLink("javascript:alert(1)"); openLink("https://example.invalid")', fullContext);

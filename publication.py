@@ -1,6 +1,7 @@
 """Small shared public projection. Never serialize editorial audits to readers."""
 
 from urllib.parse import urlsplit
+from datetime import date
 
 TOPICS = {"behavior": "Поведение и эмоции", "learning": "Обучение", "welfare": "Благополучие"}
 FORMATS = {"research_explainer": "Объяснение исследования", "discovery": "Научное открытие", "explainer": "Познавательный разбор"}
@@ -42,6 +43,16 @@ def public_payload(value):
     limitations = value.get("limitations")
     if not paragraphs or not citations or not isinstance(limitations, str):
         return {}
+    research_date = value.get('research_date', '')
+    try:
+        research_date = date.fromisoformat(research_date).isoformat() if isinstance(research_date, str) and research_date else ''
+    except ValueError:
+        research_date = ''
+    evergreen = value.get('is_evergreen') is True and bool(research_date)
+    context_note = ('Познавательный разбор · исследование от ' + research_date) if evergreen else ''
+    if evergreen:
+        format_name = 'explainer'
     return {"version": 1, "topic": topic, "topic_label": TOPICS[topic], "format": format_name,
             "format_label": FORMATS[format_name], "paragraphs": paragraphs, "limitations": limitations,
-            "evidence_scope": "abstract", "citations": citations}
+            "evidence_scope": "abstract", "citations": citations,
+            "research_date": research_date, "is_evergreen": evergreen, "context_note": context_note}
