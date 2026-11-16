@@ -113,11 +113,11 @@ class PolicyTests(unittest.TestCase):
 class BudgetReportingTests(unittest.TestCase):
     def test_all_limits_and_utc_reset_are_explained(self):
         conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (3, 15, 30, datetime(2026, 11, 17, tzinfo=timezone.utc))
+        conn.execute.return_value.fetchone.return_value = (3, 30, 30, datetime(2026, 11, 17, tzinfo=timezone.utc))
         state = budget_status(conn)
         self.assertEqual(len(state['blocked']), 3)
         text = budget_text(state)
-        for expected in ('3/3', '15/15', '30/30', '17.11 00:00 UTC', 'исчерпан'):
+        for expected in ('3/3', '30/30', '30/30', '17.11 00:00 UTC', 'исчерпан'):
             self.assertIn(expected, text)
 
     def test_exhausted_budget_creates_no_empty_worker_run(self):

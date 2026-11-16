@@ -25,7 +25,7 @@ from worker import main as worker
 from worker import editorial as rules
 from worker import requeue
 from worker import provider
-from editorial_fixtures import source_record, material, draft as make_draft, review
+from editorial_fixtures import source_record, material, draft as make_draft, review, stage_draft
 
 
 @unittest.skipUnless(os.environ.get('TEST_DATABASE_URL'), 'Set local TEST_DATABASE_URL for PostgreSQL editorial tests')
@@ -149,7 +149,7 @@ class EditorialDatabaseTests(unittest.TestCase):
     def test_reviewer_refusal_is_held_without_finding(self):
         mid = self.candidate()
         bad_review = review()
-        bad_review.update(approved=False, reasons=['Unsupported inference'])
+        bad_review.update(approved=False, source_sufficient=False, reasons=['Unsupported inference'])
         self.model.side_effect = [make_draft(), bad_review]
         self.assertEqual(worker.process_new(self.conn), 0)
         self.assertEqual(self.conn.execute('SELECT status,editorial_result->>\'reason\' FROM materials WHERE id=%s', (mid,)).fetchone(),
@@ -167,15 +167,15 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.assertEqual(self.model.call_count, 6)
 
     def test_attempt_limit_is_durable_for_unlinked_secondary_inputs(self):
-        for number in range(16):
+        for number in range(31):
             sid = self.conn.execute('SELECT id FROM sources LIMIT 1').fetchone()[0]
             self.conn.execute("INSERT INTO materials (source_id,url,title,text,raw_payload,content_scope,status) VALUES (%s,%s,'Dog learning','summary',%s,'feed_excerpt','collected')",
                               (sid, f'https://example.invalid/{number}', Jsonb({'provider': 'rss', 'record': '<item/>'})))
         self.assertEqual(worker.process_new(self.conn), 0)
-        self.assertEqual(self.count_runs('worker_attempt'), 15)
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM materials WHERE status='held'").fetchone()[0], 15)
+        self.assertEqual(self.count_runs('worker_attempt'), 30)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM materials WHERE status='held'").fetchone()[0], 30)
         self.assertEqual(worker.process_new(self.conn), 0)
-        self.assertEqual(self.count_runs('worker_attempt'), 15)
+        self.assertEqual(self.count_runs('worker_attempt'), 30)
         runs_before = self.count_runs('worker')
         self.assertEqual(worker.process_new(self.conn), 0)
         self.assertEqual(self.count_runs('worker'), runs_before)
@@ -313,7 +313,7 @@ class EditorialDatabaseTests(unittest.TestCase):
     def test_requeue_is_idempotent_and_never_erases_daily_budget(self):
         mid = self.candidate()
         self.old_hold(mid)
-        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,15)")
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,30)")
         self.assertTrue(requeue.requeue(self.conn, [mid], apply=True)[0]['requeued'])
         self.assertFalse(requeue.requeue(self.conn, [mid], apply=True)[0]['eligible'])
         self.old_hold(mid)  # even an old-looking audit cannot bypass durable history
@@ -321,7 +321,7 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.assertEqual(self.count_runs('worker_requeue'), 1)
         self.assertEqual(worker.process_new(self.conn), 0)
         self.model.assert_not_called()
-        self.assertEqual(self.count_runs('worker_attempt'), 15)
+        self.assertEqual(self.count_runs('worker_attempt'), 30)
 
     def test_requeue_batch_with_ineligible_row_makes_no_changes(self):
         first, second = self.candidate(), self.candidate(999999992)
@@ -347,17 +347,17 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.assertEqual(requeue.requeue(self.conn, [second], apply=True)[0]['reason'], 'publication_requires_review')
         self.assertEqual(self.count_runs('worker_requeue'), 0)
 
-    def test_model_failure_diagnostics_persist_without_provider_secret(self):
+    def test_truncation_in_all_formats_keeps_diagnostics_and_holds(self):
         mid = self.candidate()
         self.model.side_effect = rules.Failure('model_truncated', {'finish_reason': 'length', 'usage': {'completion_tokens': 2400}})
         self.assertEqual(worker.process_new(self.conn), 0)
         status, audit = self.conn.execute('SELECT status,editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()
-        self.assertEqual(status, 'error')
-        self.assertEqual(audit['reason'], 'model_truncated')
+        self.assertEqual(status, 'held')
+        self.assertEqual(audit['reason'], 'all_stages_held')
         self.assertEqual(audit['model_responses'][0]['finish_reason'], 'length')
-        self.assertIn('оборван', bot.status_text(self.conn))
+        self.assertIn('не прошли все три ступени', bot.status_text(self.conn))
         self.assertEqual(bot.page_data(self.conn)['findings'], [])
-        self.assertEqual(self.count_runs('worker_model_call'), 1)
+        self.assertEqual(self.count_runs('worker_model_call'), 3)
 
     def test_evergreen_publication_is_labelled_in_mini_app_start_and_delivery(self):
         mid = self.candidate()
@@ -435,13 +435,13 @@ class EditorialDatabaseTests(unittest.TestCase):
 
     def test_resuming_payment_pause_does_not_reset_exhausted_daily_attempts(self):
         self.candidate()
-        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,15)")
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,30)")
         provider.pause_provider(self.conn, {'http_status': 402})
         provider.resume_provider(self.conn, apply=True)
         self.assertFalse(provider.provider_status(self.conn)['paused'])
         self.assertEqual(worker.process_new(self.conn), 0)
         self.model.assert_not_called()
-        self.assertEqual(self.count_runs('worker_attempt'), 15)
+        self.assertEqual(self.count_runs('worker_attempt'), 30)
 
     def test_new_rules_allow_selected_old_provider_errors_to_requeue(self):
         mid = self.candidate()
@@ -451,6 +451,142 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.assertEqual(worker.process_new(self.conn), 1)
         previous = json.loads(self.conn.execute("SELECT note FROM runs WHERE service='worker_requeue'").fetchone()[0])
         self.assertEqual(previous['previous_result'], old)
+
+    def test_t15_fifteen_existing_attempts_allow_processing_and_thirty_block(self):
+        self.candidate()
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,15)")
+        self.assertEqual(worker.process_new(self.conn), 1)
+        self.assertEqual(self.count_runs('worker_attempt'), 16)
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,14)")
+        self.candidate(999999992)
+        before = self.model.call_count
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.count_runs('worker_attempt'), 30)
+        self.assertEqual(self.model.call_count, before)
+
+    def staged_answer(self, phase, evidence, submitted=None):
+        stage = evidence.get('_stage', 1)
+        return stage_draft(stage, int(evidence['source_id'].split(':')[1])) if phase == 'draft' else review()
+
+    def test_t15_third_stage_publishes_with_history_and_delivery_label(self):
+        mid = self.candidate()
+        def answer(phase, evidence, submitted=None):
+            value = self.staged_answer(phase, evidence, submitted)
+            if phase == 'review' and evidence['_stage'] < 3:
+                value.update(approved=False, all_claims_supported=False, reasons=['Unsupported scope'])
+            return value
+        self.model.side_effect = answer
+        self.assertEqual(worker.process_new(self.conn), 1)
+        self.assertEqual(self.count_runs('worker_model_call'), 6)
+        audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0]
+        self.assertEqual([e['outcome'] for e in audit['stages']], ['rejected', 'rejected', 'approved'])
+        self.assertEqual(bot.page_data(self.conn)['findings'][0]['article']['format_label'], 'Научная заметка')
+        bot.handle(self.conn, {'chat': {'id': 42, 'type': 'private'}, 'text': '/start'})
+        self.assertIn('Научная заметка', self.messages()[0])
+        self.telegram.reset_mock()
+        bot.send_new(self.conn)
+        self.assertIn('Научная заметка', self.messages()[0])
+        self.assertNotIn('Unsupported scope', self.messages()[0])
+        status = bot.status_text(self.conn)
+        self.assertIn('попытки 1/30', status)
+        self.assertIn('Научная заметка / публикация: опубликовано 1', status)
+        self.assertNotIn('Unsupported scope', status)
+
+    def test_t15_all_stages_held_then_next_candidate_is_processed(self):
+        first, second = self.candidate(), self.candidate(999999992)
+        def answer(phase, evidence, submitted=None):
+            value = self.staged_answer(phase, evidence, submitted)
+            if phase == 'review' and evidence['source_id'] == 'MED:999999991':
+                value.update(approved=False, all_claims_supported=False, reasons=['Unsupported'])
+            return value
+        self.model.side_effect = answer
+        self.assertEqual(worker.process_new(self.conn), 1)
+        self.assertEqual(self.conn.execute("SELECT status,editorial_result->>'reason' FROM materials WHERE id=%s", (first,)).fetchone(), ('held', 'all_stages_held'))
+        self.assertEqual(self.conn.execute('SELECT status FROM materials WHERE id=%s', (second,)).fetchone()[0], 'done')
+        self.assertEqual(self.count_runs('worker_model_call'), 8)
+
+    def defer_second_stage(self):
+        mid = self.candidate()
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_model_call','finished' FROM generate_series(1,27)")
+        def answer(phase, evidence, submitted=None):
+            value = self.staged_answer(phase, evidence, submitted)
+            if phase == 'review' and evidence['_stage'] == 1:
+                value.update(approved=False, all_claims_supported=False, reasons=['Too broad'])
+            return value
+        self.model.side_effect = answer
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.model.call_count, 2)
+        audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0]
+        self.assertEqual(audit['next_stage'], 2)
+        self.assertEqual(audit['reason'], 'stage_model_budget')
+        return mid
+
+    def move_budget_to_yesterday(self):
+        self.conn.execute("UPDATE runs SET started_at=(date_trunc('day',clock_timestamp() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')-interval '1 second' WHERE service IN ('worker_attempt','worker_model_call')")
+
+    def test_t15_budget_deferral_resumes_next_stage_on_new_connection(self):
+        mid = self.defer_second_stage()
+        before = self.count_runs('worker_attempt')
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.count_runs('worker_attempt'), before)
+        self.move_budget_to_yesterday()
+        with self.connect() as another:
+            self.assertEqual(worker.process_new(another), 1)
+        self.assertEqual(self.model.call_count, 4)
+        self.assertEqual([call.args[1]['_stage'] for call in self.model.call_args_list], [1, 1, 2, 2])
+        self.assertEqual(self.conn.execute('SELECT publication_payload->>\'stage\' FROM findings WHERE material_id=%s', (mid,)).fetchone()[0], '2')
+        notes = self.conn.execute("SELECT note FROM runs WHERE service='worker_model_call' AND note LIKE '{\"version\": 2,%'").fetchall()
+        for (note,) in notes:
+            entry = json.loads(note)
+            self.assertIn(entry['format_stage'], (1, 2))
+            self.assertIn(entry['phase'], ('draft', 'review'))
+            self.assertEqual(entry['rules'], rules.RULES_VERSION)
+
+    def test_t15_changed_input_does_not_resume_old_stages(self):
+        mid = self.defer_second_stage()
+        self.move_budget_to_yesterday()
+        self.conn.execute("UPDATE materials SET text=text || ' changed' WHERE id=%s", (mid,))
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.model.call_count, 2)
+        self.assertEqual(self.conn.execute("SELECT status,editorial_result->>'reason' FROM materials WHERE id=%s", (mid,)).fetchone(), ('held', 'input_changed'))
+
+    def test_t15_crash_with_unknown_provider_result_is_not_replayed(self):
+        mid = self.candidate()
+        self.model.side_effect = RuntimeError('synthetic crash after reservation')
+        with self.assertRaises(RuntimeError): worker.process_new(self.conn)
+        self.assertEqual(self.conn.execute('SELECT status FROM materials WHERE id=%s', (mid,)).fetchone()[0], 'collected')
+        with self.connect() as another:
+            self.assertEqual(worker.process_new(another), 0)
+        self.assertEqual(self.model.call_count, 1)
+        self.assertEqual(self.conn.execute("SELECT status,editorial_result->>'reason' FROM materials WHERE id=%s", (mid,)).fetchone(), ('error', 'uncertain_stage'))
+        self.assertEqual(self.count_runs('worker_model_call'), 1)
+
+    def test_t15_crash_after_known_draft_resumes_only_review(self):
+        self.candidate()
+        original = worker.Budget.checkpoint
+        crashed = []
+        def checkpoint(budget, run_id, audit):
+            original(budget, run_id, audit)
+            if not crashed and audit.get('stages') and audit['stages'][-1]['outcome'] == 'draft_ready':
+                crashed.append(True)
+                raise RuntimeError('synthetic crash after durable draft')
+        with patch.object(worker.Budget, 'checkpoint', autospec=True, side_effect=checkpoint), self.assertRaises(RuntimeError):
+            worker.process_new(self.conn)
+        with self.connect() as another:
+            self.assertEqual(worker.process_new(another), 1)
+        self.assertEqual([call.args[0] for call in self.model.call_args_list], ['draft', 'review'])
+        self.assertEqual(self.count_runs('worker_model_call'), 2)
+
+    def test_t15_source_changed_after_review_cannot_publish(self):
+        mid = self.candidate()
+        def answer(phase, evidence, submitted=None):
+            value = self.staged_answer(phase, evidence, submitted)
+            if phase == 'review': self.records[999999991]['abstractText'] += ' Changed remotely.'
+            return value
+        self.model.side_effect = answer
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM findings').fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT editorial_result->>'reason' FROM materials WHERE id=%s", (mid,)).fetchone()[0], 'source_changed')
 
 
 if __name__ == '__main__':

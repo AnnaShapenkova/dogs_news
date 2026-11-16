@@ -5,6 +5,7 @@ from datetime import date
 
 TOPICS = {"behavior": "Поведение и эмоции", "learning": "Обучение", "welfare": "Благополучие"}
 FORMATS = {"research_explainer": "Объяснение исследования", "discovery": "Научное открытие", "explainer": "Познавательный разбор"}
+STAGE_LABELS = {1: 'Разбор исследования', 2: 'Короткое объяснение', 3: 'Научная заметка'}
 
 
 def safe_url(value):
@@ -52,7 +53,9 @@ def public_payload(value):
     context_note = ('Познавательный разбор · исследование от ' + research_date) if evergreen else ''
     if evergreen:
         format_name = 'explainer'
+    stage = value.get('stage')
+    stage = stage if type(stage) is int and stage in STAGE_LABELS else None
     return {"version": 1, "topic": topic, "topic_label": TOPICS[topic], "format": format_name,
-            "format_label": FORMATS[format_name], "paragraphs": paragraphs, "limitations": limitations,
+            "format_label": STAGE_LABELS.get(stage, FORMATS[format_name]), "paragraphs": paragraphs, "limitations": limitations,
             "evidence_scope": "abstract", "citations": citations,
-            "research_date": research_date, "is_evergreen": evergreen, "context_note": context_note}
+            "research_date": research_date, "is_evergreen": evergreen, "context_note": context_note, "stage": stage}

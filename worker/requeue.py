@@ -14,6 +14,7 @@ from worker import editorial as rules
 from worker.main import WORKER_LOCK
 
 RETRY_REASONS = {
+    'all_stages_held', 'evergreen_as_news',
     'risk_requires_review', 'review_not_approved', 'draft_not_eligible',
     'invalid_model_contract', 'invalid_article_length', 'unverified_claim',
     'model_unavailable_or_invalid_json', 'source_unavailable',

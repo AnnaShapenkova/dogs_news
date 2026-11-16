@@ -11,7 +11,12 @@ from datetime import date, datetime, timedelta, timezone
 from collector.main import fetch, plain_text, DOG_WORDS, TOPIC_WORDS
 from publication import TOPICS, FORMATS
 
-RULES_VERSION = "dogs-pilot-v4"
+RULES_VERSION = "dogs-pilot-v5"
+STAGES = {
+    1: dict(words=(120, 220), paragraphs=(2, 4), claims=(1, 3)),
+    2: dict(words=(80, 120), paragraphs=(1, 2), claims=(1, 2)),
+    3: dict(words=(40, 80), paragraphs=(1, 1), claims=(1, 1)),
+}
 API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 RISK = re.compile(
     r"\b(?:aggress\w*|bit(?:e|es|ing)|aversive|punish\w*|shock|chok\w*|dos(?:e|es|age)|"
@@ -196,7 +201,8 @@ def text_field(value, minimum=1, maximum=5000):
     return value.strip()
 
 
-def validate_draft(draft, evidence):
+def validate_draft(draft, evidence, stage=None):
+    bounds = STAGES[stage] if stage in STAGES else dict(words=(80, 220), paragraphs=(1, 4), claims=(1, 6))
     require_keys(draft, ("about_dogs", "topic", "format", "risk", "headline", "paragraphs", "limitations",
                          "claims", "needs_full_text", "contains_practical_advice"))
     if draft["about_dogs"] is not True or draft["risk"] != "low" or draft["needs_full_text"] is not False or draft["contains_practical_advice"] is not False:
@@ -205,10 +211,14 @@ def validate_draft(draft, evidence):
         raise Hold("outside_pilot")
     headline = text_field(draft["headline"], 8, 140)
     limitations = text_field(draft["limitations"], 40, 1500)
-    if not isinstance(draft["paragraphs"], list) or not 1 <= len(draft["paragraphs"]) <= 4:
+    if not isinstance(draft['paragraphs'], list):
+        raise Hold('invalid_model_contract')
+    if not bounds['paragraphs'][0] <= len(draft["paragraphs"]) <= bounds['paragraphs'][1]:
+        raise Hold('invalid_article_length')
+    if not isinstance(draft["claims"], list) or not 1 <= len(draft['claims']) <= 6:
         raise Hold("invalid_model_contract")
-    if not isinstance(draft["claims"], list) or not 1 <= len(draft["claims"]) <= 6:
-        raise Hold("invalid_model_contract")
+    if not bounds['claims'][0] <= len(draft['claims']) <= bounds['claims'][1]:
+        raise Hold('invalid_stage_claim_count')
     claim_ids = set()
     for claim in draft["claims"]:
         require_keys(claim, ("id", "text", "quote", "source_id"))
@@ -227,9 +237,11 @@ def validate_draft(draft, evidence):
         refs = paragraph["claim_ids"]
         if paragraph["kind"] not in ("result", "interpretation") or not isinstance(refs, list) or not refs or any(not isinstance(r, str) or r not in claim_ids for r in refs):
             raise Hold("unverified_claim")
+        if stage in (2, 3) and paragraph['kind'] != 'result':
+            raise Hold('unsupported_interpretation')
         used_ids.update(refs)
         paragraphs.append(text_field(paragraph["text"], 20, 2500))
-    if used_ids != claim_ids or not 80 <= len(" ".join(paragraphs).split()) <= 220:
+    if used_ids != claim_ids or not bounds['words'][0] <= len(" ".join(paragraphs).split()) <= bounds['words'][1]:
         raise Hold("invalid_article_length")
     public_text = " ".join([headline, *paragraphs, limitations])
     if evidence.get('is_evergreen') and re.search(
@@ -250,9 +262,20 @@ def validate_draft(draft, evidence):
         raise Hold("missing_evidence_scope")
 
 
-def validate_review(review, draft):
+def validate_review_contract(review):
     require_keys(review, ("approved", "risk", "about_dogs", "topic", "all_claims_supported", "no_practical_advice",
                           "limitations_adequate", "no_overclaim", "source_sufficient", "reasons"))
+    flags = ("approved", "about_dogs", "all_claims_supported", "no_practical_advice", "limitations_adequate", "no_overclaim", "source_sufficient")
+    if (any(type(review[key]) is not bool for key in flags)
+            or not isinstance(review['risk'], str) or review['risk'] not in ('low', 'unknown', 'high')
+            or not isinstance(review['topic'], str) or review['topic'] not in TOPICS
+            or not isinstance(review['reasons'], list) or len(review['reasons']) > 6
+            or any(not isinstance(reason, str) or not 1 <= len(reason) <= 500 for reason in review['reasons'])):
+        raise Hold('review_not_approved')
+
+
+def validate_review(review, draft):
+    validate_review_contract(review)
     flags = ("approved", "about_dogs", "all_claims_supported", "no_practical_advice", "limitations_adequate", "no_overclaim", "source_sufficient")
     if any(review[key] is not True for key in flags) or review["risk"] != "low" or review["topic"] != draft["topic"]:
         raise Hold("review_not_approved")
@@ -260,10 +283,11 @@ def validate_review(review, draft):
         raise Hold("review_not_approved")
 
 
-def publication_payload(draft, evidence):
+def publication_payload(draft, evidence, stage=None):
     return {"version": 1, "evidence_key": evidence["evidence_key"], "topic": draft["topic"],
             "format": "explainer" if evidence.get('is_evergreen') else draft["format"],
             "research_date": evidence.get('research_date', ''), "is_evergreen": evidence.get('is_evergreen', False),
+            "stage": stage if type(stage) is int and stage in STAGES else None,
             "paragraphs": [{"kind": p["kind"], "text": p["text"]} for p in draft["paragraphs"]],
             "limitations": draft["limitations"], "evidence_scope": "abstract",
             "citations": [{key: str(evidence.get(key) or "") for key in ("title", "authors", "journal", "year", "doi", "url")}]}

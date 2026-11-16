@@ -84,7 +84,8 @@ def finding_lines(rows):
     lines = []
     for row in rows:
         summary, entity, url, source = row[:4]
-        context = public_payload(row[4]).get('context_note', '') if len(row) > 4 else ''
+        article = public_payload(row[4]) if len(row) > 4 else {}
+        context = article.get('context_note', '')
         link = safe_url(url)
         heading = f'<a href="{html.escape(link)}">{html.escape(summary)}</a>' if link else html.escape(summary)
         line = f'• {heading}\n  {html.escape(source)}'
@@ -92,6 +93,8 @@ def finding_lines(rows):
             line += f" · {html.escape(entity)}"
         if context:
             line += '\n  ' + html.escape(context)
+        if article.get('stage'):
+            line += '\n  ' + html.escape(article['format_label'])
         lines.append(line)
     return lines
 
@@ -227,6 +230,33 @@ def status_text(conn):
     lines.append(budget_text(budget_status(conn)))
     from worker.provider import provider_status, provider_text
     lines.append(provider_text(provider_status(conn)))
+    from worker.editorial import RULES_VERSION
+    decisions = conn.execute("""
+        SELECT coalesce(m.editorial_result->>'stage','0'),m.status,
+               m.editorial_result->>'reason',m.editorial_result->>'phase',count(*)
+        FROM materials m JOIN runs r ON r.id::text=m.editorial_result->>'attempt_id'
+        WHERE r.service='worker_attempt' AND m.editorial_result->>'rules_version'=%s
+          AND r.started_at >= (date_trunc('day',clock_timestamp() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
+          AND r.started_at < (date_trunc('day',clock_timestamp() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')+interval '1 day'
+        GROUP BY 1,2,3,4 ORDER BY 1,2,3,4
+    """, (RULES_VERSION,)).fetchall()
+    lines.append('Последние решения текущей версии за сутки UTC:')
+    labels = {'0': 'Источник', '1': 'Разбор', '2': 'Короткое объяснение', '3': 'Научная заметка'}
+    phases = {'source': 'источник', 'generation': 'генерация', 'draft_check': 'проверка черновика',
+              'review': 'рецензия', 'publication': 'публикация'}
+    outcomes = {'done': 'опубликовано', 'held': 'удержано', 'error': 'ошибка', 'collected': 'отложено'}
+    details = {'published': 'допущено', 'all_stages_held': 'не прошли все три ступени',
+               'uncertain_stage': 'неизвестен результат прежнего запроса',
+               'stage_model_budget': 'нужны два свободных вызова',
+               'model_daily_limit': 'исчерпан бюджет модели', 'input_changed': 'исходник изменился',
+               'invalid_stage_claim_count': 'неверное число выводов',
+               'unsupported_interpretation': 'для формата нужна только информация о результате'}
+    for stage, state, reason, phase, count in decisions:
+        text = details.get(reason, reason_names.get(reason, 'требуется проверка'))
+        lines.append(f"• {labels.get(stage, 'Материал')} / {phases.get(phase, 'проверка')}: "
+                     f"{outcomes.get(state, 'проверяется')} {count} — {text}.")
+    if not decisions:
+        lines.append('Завершённых решений этой версии сегодня пока нет.')
     return "\n".join(lines)
 
 

@@ -2,6 +2,22 @@
 
 from copy import deepcopy
 
+
+def stage_draft(stage, number=999999991):
+    value = draft(number)
+    if stage == 2:
+        value['paragraphs'] = [dict(kind='result', claim_ids=['c1', 'c2'],
+                                    text=' '.join(' '.join(p['text'] for p in value['paragraphs']).split()[:95]))]
+    elif stage == 3:
+        value['paragraphs'] = [dict(kind='result', claim_ids=['c1'], text=(
+            'В лабораторной задаче собаки выбирали совпадающее изображение чаще, чем альтернативное. '
+            'Исследователи показывали животным небольшой набор знакомых и незнакомых картинок '
+            'и непосредственно записывали их ответы в одинаковых условиях. Этот результат относится '
+            'к конкретной задаче с изображениями и ограниченной выборке; он не устанавливает общее '
+            'понимание картинок в повседневной жизни.'))]
+        value['claims'] = value['claims'][:1]
+    return value
+
 ABSTRACT = (
     "Domestic dogs were observed in a visual matching task using familiar and unfamiliar images. "
     "The study included 24 dogs whose responses were recorded under controlled conditions. "

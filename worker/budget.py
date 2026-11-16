@@ -1,8 +1,12 @@
 """Read-only UTC budget reporting shared by worker and bot."""
 
 MAX_PUBLICATIONS = 3
-MAX_ATTEMPTS = 15
+MAX_ATTEMPTS = 30
 MAX_MODEL_CALLS = 30
+
+
+class BudgetLimit(Exception):
+    pass
 
 
 def budget_status(conn):
@@ -24,6 +28,8 @@ def budget_status(conn):
                                   ('publication_daily_limit', 'attempt_daily_limit', 'model_daily_limit')):
         if used >= limit:
             blocked.append(name)
+    if MAX_MODEL_CALLS - row[2] == 1:
+        blocked.append('stage_model_budget')
     return dict(publications=row[0], attempts=row[1], model_calls=row[2], reset_at=row[3], blocked=blocked)
 
 
@@ -34,7 +40,7 @@ def budget_text(state):
             f"попытки {state['attempts']}/{MAX_ATTEMPTS}; "
             f"вызовы модели {state['model_calls']}/{MAX_MODEL_CALLS}. Обновление: {reset}.")
     names = {'publication_daily_limit': 'публикаций', 'attempt_daily_limit': 'попыток',
-             'model_daily_limit': 'вызовов модели'}
+             'model_daily_limit': 'вызовов модели', 'stage_model_budget': 'пары вызовов для новой ступени'}
     if state['blocked']:
         text += ' Обработка остановлена: исчерпан суточный лимит ' + ', '.join(names[k] for k in state['blocked']) + '.'
     return text
