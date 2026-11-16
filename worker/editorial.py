@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 from collector.main import fetch, plain_text, DOG_WORDS, TOPIC_WORDS
 from publication import TOPICS, FORMATS
 
-RULES_VERSION = "dogs-pilot-v1"
+RULES_VERSION = "dogs-pilot-v2"
 API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 RISK = re.compile(
     r"\b(?:aggress\w*|bit(?:e|es|ing)|aversive|punish\w*|shock|chok\w*|dos(?:e|es|age)|"
@@ -33,7 +33,14 @@ class Hold(Exception):
 
 
 class Failure(Exception):
-    pass
+    def __init__(self, reason, diagnostics=None):
+        super().__init__(reason)
+        self.diagnostics = diagnostics or {}
+
+
+def risk_signals(text):
+    """Private signals for contextual review; a topic word is not a verdict."""
+    return sorted({match.group(0).lower() for match in RISK.finditer(text)})
 
 
 def normal(value):
@@ -136,8 +143,6 @@ def verify_source(material):
         raise Hold("insufficient_content")
     if not DOG_WORDS.search(title) or not TOPIC_WORDS.search(title + " " + abstract):
         raise Hold("outside_pilot")
-    if RISK.search(title + " " + abstract):
-        raise Hold("risk_requires_review")
     if INJECTION.search(title + " " + abstract):
         raise Hold("untrusted_source_instructions")
     journal_info = record.get("journalInfo") or {}
@@ -151,7 +156,7 @@ def verify_source(material):
             "url": f"https://europepmc.org/article/MED/{record['id']}",
             "authors": record.get("authorString") or "", "journal": journal.get("title") or "",
             "year": record.get("pubYear") or "", "request_url": request_url,
-            "evidence_scope": "abstract"}
+            "evidence_scope": "abstract", "risk_signals": risk_signals(title + " " + abstract)}
 
 
 def require_keys(value, keys):
@@ -201,7 +206,7 @@ def validate_draft(draft, evidence):
     if used_ids != claim_ids or not 120 <= len(" ".join(paragraphs).split()) <= 220:
         raise Hold("invalid_article_length")
     public_text = " ".join([headline, *paragraphs, limitations])
-    if RISK.search(public_text) or INSTRUCTIONS.search(public_text) or OVERCLAIM.search(public_text) or INJECTION.search(public_text):
+    if INSTRUCTIONS.search(public_text) or OVERCLAIM.search(public_text) or INJECTION.search(public_text):
         raise Hold("risk_requires_review")
     if 'http' in public_text.lower() or re.search(r'<\s*/?\s*(?:script|iframe|img|a)\b', public_text, re.I):
         raise Hold("unverified_link")

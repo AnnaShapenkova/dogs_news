@@ -44,15 +44,15 @@ class EditorialTests(unittest.TestCase):
         with self.assertRaisesRegex(rules.Hold, 'unverified_claim'):
             rules.validate_draft(unsupported, self.verify())
 
-    def test_four_risky_control_examples(self):
+    def test_sensitive_source_topics_are_signals_not_automatic_refusals(self):
         for phrase in ('drug dosage', 'therapeutic diet', 'aggression and biting', 'shock collar'):
             with self.subTest(phrase=phrase):
                 value = source_record()
                 value['abstractText'] += ' ' + phrase
                 current = material()
                 current['raw_payload']['record'] = value
-                with self.assertRaisesRegex(rules.Hold, 'risk_requires_review'):
-                    self.verify(current, value)
+                evidence = self.verify(current, value)
+                self.assertTrue(evidence['risk_signals'])
 
     def test_two_untrusted_or_provider_error_control_examples(self):
         value = source_record()
@@ -175,7 +175,7 @@ class EditorialTests(unittest.TestCase):
         class Response:
             def __enter__(self): return self
             def __exit__(self, *args): pass
-            def read(self, size): return json.dumps({'choices': [{'message': {'content': json.dumps(review())}}]}).encode()
+            def read(self, size): return json.dumps({'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(review())}}]}).encode()
         with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-secret'}), patch('urllib.request.urlopen', return_value=Response()) as network:
             self.assertEqual(worker.ask_model('review', self.verify(), draft()), review())
             request = network.call_args.args[0]

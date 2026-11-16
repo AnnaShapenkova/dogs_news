@@ -203,8 +203,23 @@ def status_text(conn):
         'outside_pilot': 'тема вне пилота', 'duplicate_evidence': 'исследование уже опубликовано',
         'model_unavailable_or_invalid_json': 'ошибка ответа модели', 'source_changed': 'содержание источника изменилось',
     }
+    reason_names.update({
+        'invalid_model_contract': 'ответ модели нарушает формат данных',
+        'model_invalid_contract': 'модель вернула не объект JSON',
+        'model_http_error': 'ошибка HTTP при обращении к модели',
+        'model_connection_error': 'нет соединения с моделью',
+        'model_timeout': 'истекло время ожидания модели',
+        'model_invalid_envelope': 'неверная структура ответа провайдера',
+        'model_empty_content': 'модель вернула пустой текст',
+        'model_truncated': 'ответ модели оборван по лимиту длины',
+        'model_incomplete': 'генерация не завершена обычным образом',
+        'model_invalid_json': 'текст модели не является допустимым JSON',
+        'model_response_too_large': 'превышен размер ответа модели',
+    })
     for reason, count in reasons:
         lines.append(f"• {reason_names.get(reason, 'нужна дополнительная проверка')}: {count}")
+    from worker.budget import budget_status, budget_text
+    lines.append(budget_text(budget_status(conn)))
     return "\n".join(lines)
 
 

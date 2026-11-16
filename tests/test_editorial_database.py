@@ -23,6 +23,7 @@ from bot import main as bot
 from web import main as web
 from worker import main as worker
 from worker import editorial as rules
+from worker import requeue
 from editorial_fixtures import source_record, material, draft as make_draft, review
 
 
@@ -174,6 +175,10 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT count(*) FROM materials WHERE status='held'").fetchone()[0], 15)
         self.assertEqual(worker.process_new(self.conn), 0)
         self.assertEqual(self.count_runs('worker_attempt'), 15)
+        runs_before = self.count_runs('worker')
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.count_runs('worker'), runs_before)
+        self.assertIn('исчерпан суточный лимит попыток', bot.status_text(self.conn))
         self.model.assert_not_called()
 
     def test_model_call_limit_defers_without_calling_provider(self):
@@ -274,6 +279,84 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT publication_payload,published_at FROM findings').fetchone(), ({}, None))
         self.assertEqual(self.conn.execute('SELECT raw_payload,content_scope FROM materials').fetchone()[0]['provider'], 'europepmc')
         self.assertEqual(self.conn.execute('SELECT name FROM subscribers WHERE chat_id=7').fetchone()[0], 'preserved')
+
+    def old_hold(self, mid, reason='risk_requires_review'):
+        old = dict(rules_version='dogs-pilot-v1', reason=reason, outcome='held', private='SECRET_OLD')
+        self.conn.execute("UPDATE materials SET status='held',editorial_result=%s WHERE id=%s", (Jsonb(old), mid))
+        return old
+
+    def test_sensitive_source_requeue_to_publication_and_telegram(self):
+        mid = self.candidate()
+        record = self.records[999999991]
+        record['abstractText'] += ' Aggression and pain were observed in the learning task.'
+        self.conn.execute('UPDATE materials SET raw_payload=%s WHERE id=%s',
+                          (Jsonb({'provider': 'europepmc', 'record': record}), mid))
+        old = self.old_hold(mid)
+        self.assertTrue(requeue.requeue(self.conn, [mid])[0]['eligible'])
+        self.assertEqual(self.count_runs('worker_requeue'), 0)
+        self.assertEqual(self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0], old)
+        self.assertTrue(requeue.requeue(self.conn, [mid], apply=True)[0]['requeued'])
+        self.assertEqual(worker.process_new(self.conn), 1)
+        audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0]
+        self.assertIn('aggression', audit['risk_signals'])
+        self.assertEqual(json.loads(self.conn.execute("SELECT note FROM runs WHERE service='worker_requeue'").fetchone()[0])['previous_result'], old)
+        bot.handle(self.conn, {'chat': {'id': 42, 'type': 'private'}, 'text': '/start'})
+        self.telegram.reset_mock()
+        bot.send_new(self.conn)
+        self.assertEqual(len(self.messages()), 1)
+        self.assertNotIn('SECRET_OLD', self.messages()[0])
+        self.assertNotIn('risk_signals', json.dumps(bot.page_data(self.conn)))
+        self.assertEqual(self.count_runs('worker_attempt'), 1)
+        self.assertEqual(self.count_runs('worker_model_call'), 2)
+
+    def test_requeue_is_idempotent_and_never_erases_daily_budget(self):
+        mid = self.candidate()
+        self.old_hold(mid)
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,15)")
+        self.assertTrue(requeue.requeue(self.conn, [mid], apply=True)[0]['requeued'])
+        self.assertFalse(requeue.requeue(self.conn, [mid], apply=True)[0]['eligible'])
+        self.old_hold(mid)  # even an old-looking audit cannot bypass durable history
+        self.assertEqual(requeue.requeue(self.conn, [mid], apply=True)[0]['reason'], 'already_requeued_for_version')
+        self.assertEqual(self.count_runs('worker_requeue'), 1)
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.model.assert_not_called()
+        self.assertEqual(self.count_runs('worker_attempt'), 15)
+
+    def test_requeue_batch_with_ineligible_row_makes_no_changes(self):
+        first, second = self.candidate(), self.candidate(999999992)
+        old = self.old_hold(first)
+        self.old_hold(second, 'publication_requires_review')
+        result = requeue.requeue(self.conn, [first, second], apply=True)
+        self.assertFalse(all(row['eligible'] for row in result))
+        self.assertEqual(self.count_runs('worker_requeue'), 0)
+        self.assertEqual(self.conn.execute('SELECT status,editorial_result FROM materials WHERE id=%s', (first,)).fetchone(), ('held', old))
+
+    def test_requeue_rejects_retracted_snapshot_and_duplicate_evidence(self):
+        first = self.candidate()
+        self.assertEqual(worker.process_new(self.conn), 1)
+        second = self.candidate(999999992)
+        record = source_record()
+        self.conn.execute('UPDATE materials SET raw_payload=%s WHERE id=%s',
+                          (Jsonb({'provider': 'europepmc', 'record': record}), second))
+        self.old_hold(second)
+        self.assertEqual(requeue.requeue(self.conn, [second])[0]['reason'], 'duplicate_evidence')
+        record['pubTypeList'] = {'pubType': ['Retracted Publication']}
+        self.conn.execute('UPDATE materials SET raw_payload=%s WHERE id=%s',
+                          (Jsonb({'provider': 'europepmc', 'record': record}), second))
+        self.assertEqual(requeue.requeue(self.conn, [second], apply=True)[0]['reason'], 'publication_requires_review')
+        self.assertEqual(self.count_runs('worker_requeue'), 0)
+
+    def test_model_failure_diagnostics_persist_without_provider_secret(self):
+        mid = self.candidate()
+        self.model.side_effect = rules.Failure('model_truncated', {'finish_reason': 'length', 'usage': {'completion_tokens': 2400}})
+        self.assertEqual(worker.process_new(self.conn), 0)
+        status, audit = self.conn.execute('SELECT status,editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()
+        self.assertEqual(status, 'error')
+        self.assertEqual(audit['reason'], 'model_truncated')
+        self.assertEqual(audit['model_responses'][0]['finish_reason'], 'length')
+        self.assertIn('оборван', bot.status_text(self.conn))
+        self.assertEqual(bot.page_data(self.conn)['findings'], [])
+        self.assertEqual(self.count_runs('worker_model_call'), 1)
 
 
 if __name__ == '__main__':
