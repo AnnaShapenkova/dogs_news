@@ -225,6 +225,8 @@ def status_text(conn):
         lines.append(f"• {reason_names.get(reason, 'нужна дополнительная проверка')}: {count}")
     from worker.budget import budget_status, budget_text
     lines.append(budget_text(budget_status(conn)))
+    from worker.provider import provider_status, provider_text
+    lines.append(provider_text(provider_status(conn)))
     return "\n".join(lines)
 
 

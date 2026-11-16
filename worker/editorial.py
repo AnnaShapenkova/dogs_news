@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from collector.main import fetch, plain_text, DOG_WORDS, TOPIC_WORDS
 from publication import TOPICS, FORMATS
 
-RULES_VERSION = "dogs-pilot-v3"
+RULES_VERSION = "dogs-pilot-v4"
 API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 RISK = re.compile(
     r"\b(?:aggress\w*|bit(?:e|es|ing)|aversive|punish\w*|shock|chok\w*|dos(?:e|es|age)|"

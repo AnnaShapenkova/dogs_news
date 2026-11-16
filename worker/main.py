@@ -14,12 +14,13 @@ from psycopg.types.json import Jsonb
 import db
 from worker import editorial as rules
 from worker.budget import MAX_PUBLICATIONS, MAX_ATTEMPTS, MAX_MODEL_CALLS, budget_status, budget_text
+from worker.provider import WORKER_LOCK, safe_diagnostics, pause_provider, provider_status, provider_text
 
 SERVICE = "worker"
 MODEL = os.environ.get("MODEL", "anthropic/claude-haiku-5.5")
-PROMPT_VERSION = "dogs-v3"
+PROMPT_VERSION = "dogs-v4"
+OUTPUT_TOKENS = {'draft': 6000, 'review': 2400}
 POLL_SECONDS = 10
-WORKER_LOCK = 4208
 BUDGET_LOCK = 4210
 
 DAY_START = "(date_trunc('day', clock_timestamp() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"
@@ -130,9 +131,33 @@ def parse_model_response(data):
     return ModelAnswer(value, diagnostics)
 
 
+def http_error_diagnostics(error):
+    diagnostics = {'http_status': error.code}
+    if error.code != 402:
+        error.close()
+        return diagnostics
+    try:
+        retry = error.headers.get('Retry-After') if error.headers else None
+        if isinstance(retry, str) and len(retry.strip()) <= 6 and retry.strip().isascii() and retry.strip().isdigit():
+            diagnostics['retry_after_seconds'] = int(retry.strip())
+        data = error.read(32 * 1024 + 1)
+        if len(data) <= 32 * 1024:
+            value = json.loads(data)
+            detail = value.get('error') if isinstance(value, dict) else None
+            metadata = detail.get('metadata') if isinstance(detail, dict) else None
+            if isinstance(metadata, dict):
+                diagnostics['limit_source'] = metadata.get('limit_source')
+                diagnostics['payment_reason'] = metadata.get('reason')
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass  # A missing/invalid body must not hide the HTTP 402 itself.
+    finally:
+        error.close()
+    return safe_diagnostics(diagnostics)
+
+
 def ask_model(stage, evidence, draft=None):
     """Only this function calls the configured model; callers reserve the budget first."""
-    body = {"model": MODEL, "temperature": 0.2, "max_tokens": 2400,
+    body = {"model": MODEL, "temperature": 0.2, "max_tokens": OUTPUT_TOKENS[stage],
             "messages": [{"role": "system", "content": DRAFT_PROMPT if stage == "draft" else REVIEW_PROMPT},
                          {"role": "user", "content": json.dumps({"source": evidence, "draft": draft}, ensure_ascii=False)}],
             "response_format": {"type": "json_object"}}
@@ -143,7 +168,7 @@ def ask_model(stage, evidence, draft=None):
         with urllib.request.urlopen(request, timeout=60) as response:
             data = response.read(128 * 1024 + 1)
     except urllib.error.HTTPError as error:
-        raise rules.Failure("model_http_error", {"http_status": error.code}) from None
+        raise rules.Failure("model_http_error", http_error_diagnostics(error)) from None
     except (TimeoutError, socket.timeout):
         raise rules.Failure("model_timeout") from None
     except urllib.error.URLError as error:
@@ -187,6 +212,8 @@ class Budget:
                           (status, reason, run_id))
 
     def model(self, material_id, stage, evidence, draft=None):
+        if provider_status(self.conn)['paused']:
+            raise BudgetLimit('provider_payment_paused')
         call_id = self.reserve("worker_model_call", MAX_MODEL_CALLS, material_id, stage)
         if call_id is None:
             raise BudgetLimit("model_daily_limit")
@@ -195,6 +222,8 @@ class Budget:
         except rules.Failure as error:
             self.diagnostics.append({"stage": stage, "reason": str(error), **error.diagnostics})
             self.finish(call_id, "failed", f"material {material_id}; {stage}; {error}")
+            if error.diagnostics.get('http_status') == 402:
+                pause_provider(self.conn, error.diagnostics)
             raise
         except Exception:
             self.finish(call_id, "failed", f"material {material_id}; {stage}; provider_error")
@@ -280,6 +309,7 @@ def process_one(conn, budget):
             reason = str(error)
         except rules.Failure as error:
             status, reason = "error", str(error)
+            stop = error.diagnostics.get('http_status') == 402
         except BudgetLimit as error:
             status, reason, stop = "collected", str(error), True
         audit["reason"] = reason
@@ -303,13 +333,13 @@ def process_new(conn):
     found = 0
     processed = 0
     try:
-        if budget_status(conn)["blocked"]:
+        if budget_status(conn)["blocked"] or provider_status(conn)['paused']:
             return 0
         with db.connect() as audit_conn:
             budget = Budget(audit_conn)
             run_id = db.start_run(conn, SERVICE)
             for _ in range(MAX_ATTEMPTS):
-                if budget_status(conn)["blocked"]:
+                if budget_status(conn)["blocked"] or provider_status(conn)['paused']:
                     break
                 outcome = process_one(conn, budget)
                 if outcome is None:
@@ -319,7 +349,8 @@ def process_new(conn):
                 if outcome["stop"]:
                     break
             db.finish_run(conn, SERVICE, run_id, found,
-                          f"проверено {processed}; опубликовано {found}; {budget_text(budget_status(conn))}")
+                          f"проверено {processed}; опубликовано {found}; {budget_text(budget_status(conn))}; "
+                          + provider_text(provider_status(conn)))
         return found
     except Exception as error:
         if run_id is not None:
@@ -334,6 +365,7 @@ def main():
     db.init_schema(conn)
     db.log(SERVICE, f"редакция о собаках; модель {MODEL}; до 3 публикаций и 15 попыток в сутки UTC")
     db.log(SERVICE, budget_text(budget_status(conn)))
+    db.log(SERVICE, provider_text(provider_status(conn)))
     if not os.environ.get("OPENROUTER_API_KEY", "").strip():
         db.log(SERVICE, "OPENROUTER_API_KEY не задан: входы остаются collected, платные запросы не выполняются")
         run_id = db.start_run(conn, SERVICE)

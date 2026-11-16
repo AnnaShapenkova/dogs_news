@@ -24,6 +24,7 @@ from web import main as web
 from worker import main as worker
 from worker import editorial as rules
 from worker import requeue
+from worker import provider
 from editorial_fixtures import source_record, material, draft as make_draft, review
 
 
@@ -374,6 +375,82 @@ class EditorialDatabaseTests(unittest.TestCase):
         bot.send_new(self.conn)
         self.assertIn('исследование от 2023-05-01', self.messages()[0])
         self.assertNotIn('Свежие:', self.messages()[0])
+
+    def test_payment_failure_pauses_after_first_and_resume_preserves_counts(self):
+        first, second = self.candidate(), self.candidate(999999992)
+        self.model.side_effect = rules.Failure('model_http_error', {'http_status': 402, 'limit_source': 'openrouter_credits'})
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.model.call_count, 1)
+        self.assertEqual(self.conn.execute('SELECT status FROM materials WHERE id=%s', (first,)).fetchone()[0], 'error')
+        self.assertEqual(self.conn.execute('SELECT status,editorial_result FROM materials WHERE id=%s', (second,)).fetchone(), ('collected', None))
+        self.assertEqual(self.count_runs('worker_attempt'), 1)
+        self.assertEqual(self.count_runs('worker_model_call'), 1)
+        count = self.count_runs(provider.SERVICE)
+        self.assertTrue(provider.resume_provider(self.conn)['paused'])  # preview only
+        self.assertEqual(self.count_runs(provider.SERVICE), count)
+        self.assertIn('ограничение оплаты/кредитов', bot.status_text(self.conn))
+        with self.connect() as another:
+            self.assertTrue(provider.provider_status(another)['paused'])
+            self.assertEqual(worker.process_new(another), 0)
+        self.assertEqual(self.model.call_count, 1)
+        self.assertTrue(provider.resume_provider(self.conn, apply=True)['changed'])
+        count = self.count_runs(provider.SERVICE)
+        self.assertFalse(provider.resume_provider(self.conn, apply=True)['changed'])
+        self.assertEqual(self.count_runs(provider.SERVICE), count)
+        self.assertEqual(self.count_runs('worker_attempt'), 1)
+        self.model.side_effect = self.model_answer
+        self.assertEqual(worker.process_new(self.conn), 1)
+        self.assertEqual(self.count_runs('worker_attempt'), 2)
+        self.assertEqual(self.count_runs('worker_model_call'), 3)
+        self.assertEqual(self.conn.execute('SELECT status FROM materials WHERE id=%s', (first,)).fetchone()[0], 'error')
+        self.assertNotIn('limit_source', json.dumps(bot.page_data(self.conn)))
+
+    def test_review_payment_failure_also_stops_next_candidate(self):
+        first, second = self.candidate(), self.candidate(999999992)
+        self.model.side_effect = [make_draft(), rules.Failure('model_http_error', {'http_status': 402})]
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.model.call_count, 2)
+        self.assertTrue(provider.provider_status(self.conn)['paused'])
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM findings').fetchone()[0], 0)
+        self.assertEqual(self.conn.execute('SELECT status FROM materials WHERE id=%s', (second,)).fetchone()[0], 'collected')
+        audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (first,)).fetchone()[0]
+        self.assertEqual(audit['model_responses'][-1]['stage'], 'review')
+
+    def test_durable_payment_pause_survives_parent_rollback_and_daily_reset(self):
+        mid = self.candidate()
+        self.model.side_effect = rules.Failure('model_http_error', {'http_status': 402})
+        persist = worker.pause_provider
+        def crash(conn, diagnostic):
+            persist(conn, diagnostic)
+            raise RuntimeError('synthetic crash after durable pause')
+        with patch.object(worker, 'pause_provider', side_effect=crash), self.assertRaises(RuntimeError):
+            worker.process_new(self.conn)
+        self.assertEqual(self.conn.execute('SELECT status,editorial_result FROM materials WHERE id=%s', (mid,)).fetchone(), ('collected', None))
+        self.assertTrue(provider.provider_status(self.conn)['paused'])
+        self.assertEqual(self.count_runs('worker_model_call'), 1)
+        self.conn.execute("UPDATE runs SET started_at=started_at-interval '1 day' WHERE service IN ('worker_attempt','worker_model_call')")
+        with self.connect() as another:
+            self.assertEqual(worker.process_new(another), 0)
+        self.assertEqual(self.model.call_count, 1)
+
+    def test_resuming_payment_pause_does_not_reset_exhausted_daily_attempts(self):
+        self.candidate()
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,15)")
+        provider.pause_provider(self.conn, {'http_status': 402})
+        provider.resume_provider(self.conn, apply=True)
+        self.assertFalse(provider.provider_status(self.conn)['paused'])
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.model.assert_not_called()
+        self.assertEqual(self.count_runs('worker_attempt'), 15)
+
+    def test_new_rules_allow_selected_old_provider_errors_to_requeue(self):
+        mid = self.candidate()
+        old = {'rules_version': 'dogs-pilot-v3', 'reason': 'model_truncated', 'outcome': 'error'}
+        self.conn.execute("UPDATE materials SET status='error',editorial_result=%s WHERE id=%s", (Jsonb(old), mid))
+        self.assertTrue(requeue.requeue(self.conn, [mid], apply=True)[0]['requeued'])
+        self.assertEqual(worker.process_new(self.conn), 1)
+        previous = json.loads(self.conn.execute("SELECT note FROM runs WHERE service='worker_requeue'").fetchone()[0])
+        self.assertEqual(previous['previous_result'], old)
 
 
 if __name__ == '__main__':
