@@ -7,7 +7,7 @@ from worker.budget import BudgetLimit
 
 SIMPLIFIABLE = {
     'invalid_article_length', 'missing_evidence_scope', 'not_russian', 'evergreen_as_news',
-    'unverified_claim', 'unverified_number', 'unsupported_interpretation', 'invalid_stage_claim_count',
+    'unverified_claim', 'unverified_number', 'unsupported_interpretation', 'invalid_stage_claim_count', 'readability_failed',
 }
 
 
@@ -23,6 +23,12 @@ def can_simplify(reason, draft, review=None):
     # Instructions in any model output are never fed to a further generation.
     if rules.INJECTION.search(json.dumps([draft, review], ensure_ascii=False)):
         return False
+    if reason == 'readability_failed':
+        try:
+            rules.validate_review_contract(review)
+        except rules.Hold:
+            return False
+        return review['owner_relevant'] and review['source_sufficient'] and review['risk'] == 'low'
     if reason in SIMPLIFIABLE or reason == 'risk_requires_review':
         return True
     if reason == 'draft_not_eligible' and isinstance(draft, dict):
@@ -33,7 +39,7 @@ def can_simplify(reason, draft, review=None):
             rules.validate_review_contract(review)
         except rules.Hold:
             return False
-        return (review['about_dogs'] and review['source_sufficient'] and review['risk'] != 'unknown'
+        return (review['owner_relevant'] and review['about_dogs'] and review['source_sufficient'] and review['risk'] != 'unknown'
                 and isinstance(draft, dict) and review['topic'] == draft.get('topic')
                 and (bool(review['reasons']) or any(review[k] is False for k in
                      ('all_claims_supported', 'no_practical_advice', 'limitations_adequate', 'no_overclaim'))))
@@ -60,13 +66,16 @@ def run_stages(material, audit, budget, attempt_id):
         audit['risk_signals'] = evidence.get('risk_signals', [])
         evidence['_stage'] = stage
         evidence['_feedback'] = [e['reason'] for e in entries if e.get('outcome') == 'rejected']
+        if 'editorial_fit' in audit:
+            rules.validate_editorial_fit(audit['editorial_fit'], evidence)
+            evidence['_fit'] = audit['editorial_fit']
         if len(entries) < stage:
             if budget.remaining_calls() < 2:
                 raise BudgetLimit('stage_model_budget')
             entries.append(dict(stage=stage, outcome='pending'))
             save()
         entry = entries[stage - 1]
-        if entry.get('outcome') not in ('pending', 'generating', 'draft_ready', 'reviewing', 'review_ready', 'approved', 'rejected'):
+        if entry.get('outcome') not in ('pending', 'generating', 'response_ready', 'draft_ready', 'reviewing', 'review_ready', 'approved', 'rejected'):
             raise rules.Hold('uncertain_stage')
         if entry['outcome'] == 'rejected':
             audit['next_stage'] = stage + 1
@@ -80,9 +89,23 @@ def run_stages(material, audit, budget, attempt_id):
                     raise rules.Failure('uncertain_stage')
                 entry['outcome'] = 'generating'
                 save()
-                draft = budget.model(material['id'], 'draft', evidence)
+                response = budget.model(material['id'], 'draft', evidence)
+                entry.update(response=response, outcome='response_ready')
+                save()
+            if entry['outcome'] == 'response_ready':
+                response = entry['response']
+                if '_fit' not in evidence:
+                    if isinstance(response, dict) and isinstance(response.get('editorial_fit'), dict):
+                        audit['editorial_fit'] = response['editorial_fit']
+                    fit, draft = rules.unwrap_first_draft(response, evidence)
+                    audit['editorial_fit'] = fit
+                    evidence['_fit'] = fit
+                else:
+                    draft = response
                 entry.update(draft=draft, outcome='draft_ready')
                 save()
+            if '_fit' not in evidence:
+                raise rules.Failure('invalid_editorial_contract')
             audit['draft'] = draft  # backward-compatible last generated version
             audit['phase'] = 'draft_check'
             audit['policy_signals'] = rules.policy_signals(public_text(draft))

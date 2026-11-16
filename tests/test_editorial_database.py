@@ -25,7 +25,7 @@ from worker import main as worker
 from worker import editorial as rules
 from worker import requeue
 from worker import provider
-from editorial_fixtures import source_record, material, draft as make_draft, review, stage_draft
+from editorial_fixtures import source_record, material, draft as make_draft, review, stage_draft, first_draft, editorial_fit
 
 
 @unittest.skipUnless(os.environ.get('TEST_DATABASE_URL'), 'Set local TEST_DATABASE_URL for PostgreSQL editorial tests')
@@ -72,7 +72,8 @@ class EditorialDatabaseTests(unittest.TestCase):
         return json.dumps({'hitCount': len(found), 'resultList': {'result': found}}).encode()
 
     def model_answer(self, stage, evidence, submitted=None):
-        return make_draft(int(evidence['source_id'].split(':')[1])) if stage == 'draft' else review()
+        value = make_draft(int(evidence['source_id'].split(':')[1])) if stage == 'draft' else review()
+        return first_draft(value) if stage == 'draft' and '_fit' not in evidence else value
 
     def candidate(self, number=999999991, secondary=False):
         value = material(number)
@@ -150,7 +151,7 @@ class EditorialDatabaseTests(unittest.TestCase):
         mid = self.candidate()
         bad_review = review()
         bad_review.update(approved=False, source_sufficient=False, reasons=['Unsupported inference'])
-        self.model.side_effect = [make_draft(), bad_review]
+        self.model.side_effect = [first_draft(make_draft()), bad_review]
         self.assertEqual(worker.process_new(self.conn), 0)
         self.assertEqual(self.conn.execute('SELECT status,editorial_result->>\'reason\' FROM materials WHERE id=%s', (mid,)).fetchone(),
                          ('held', 'review_not_approved'))
@@ -407,7 +408,7 @@ class EditorialDatabaseTests(unittest.TestCase):
 
     def test_review_payment_failure_also_stops_next_candidate(self):
         first, second = self.candidate(), self.candidate(999999992)
-        self.model.side_effect = [make_draft(), rules.Failure('model_http_error', {'http_status': 402})]
+        self.model.side_effect = [first_draft(make_draft()), rules.Failure('model_http_error', {'http_status': 402})]
         self.assertEqual(worker.process_new(self.conn), 0)
         self.assertEqual(self.model.call_count, 2)
         self.assertTrue(provider.provider_status(self.conn)['paused'])
@@ -466,7 +467,8 @@ class EditorialDatabaseTests(unittest.TestCase):
 
     def staged_answer(self, phase, evidence, submitted=None):
         stage = evidence.get('_stage', 1)
-        return stage_draft(stage, int(evidence['source_id'].split(':')[1])) if phase == 'draft' else review()
+        value = stage_draft(stage, int(evidence['source_id'].split(':')[1])) if phase == 'draft' else review()
+        return first_draft(value) if phase == 'draft' and '_fit' not in evidence else value
 
     def test_t15_third_stage_publishes_with_history_and_delivery_label(self):
         mid = self.candidate()
@@ -587,6 +589,91 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.assertEqual(worker.process_new(self.conn), 0)
         self.assertEqual(self.conn.execute('SELECT count(*) FROM findings').fetchone()[0], 0)
         self.assertEqual(self.conn.execute("SELECT editorial_result->>'reason' FROM materials WHERE id=%s", (mid,)).fetchone()[0], 'source_changed')
+
+    def test_t16_specialist_fit_is_held_without_review_or_cascade(self):
+        mid = self.candidate()
+        fit = editorial_fit()
+        fit.update(audience='specialist', focus='clinical_methods', decision='skip',
+                   reason='specialist_clinical', owner_question='')
+        self.model.side_effect = lambda *args: dict(editorial_fit=fit, article=None)
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.model.call_count, 1)
+        audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0]
+        self.assertEqual(audit['reason'], 'clinical_focus')
+        self.assertEqual(audit['editorial_fit']['focus'], 'clinical_methods')
+        self.assertEqual(len(audit['stages']), 1)
+        self.assertIn('клиническая задача для специалистов', bot.status_text(self.conn))
+        self.assertEqual(bot.page_data(self.conn)['findings'], [])
+
+    def test_t16_owner_review_refusal_is_not_simplified(self):
+        self.candidate()
+        value = review()
+        value.update(approved=False, owner_relevant=False, reasons=['Specialist content'])
+        self.model.side_effect = [first_draft(), value]
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.model.call_count, 2)
+        self.assertEqual(self.conn.execute("SELECT editorial_result->>'reason' FROM materials").fetchone()[0], 'audience_mismatch')
+
+    def test_t16_fit_and_question_are_preserved_across_readability_fallback(self):
+        mid = self.candidate()
+        def answer(phase, evidence, submitted=None):
+            value = self.staged_answer(phase, evidence, submitted)
+            if phase == 'review' and evidence['_stage'] == 1:
+                value.update(approved=False, plain_language=False, reasons=['Too technical'])
+            return value
+        self.model.side_effect = answer
+        self.assertEqual(worker.process_new(self.conn), 1)
+        self.assertEqual(self.model.call_count, 4)
+        audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0]
+        self.assertEqual(audit['editorial_fit'], editorial_fit())
+        self.assertEqual(audit['stages'][0]['reason'], 'readability_failed')
+        self.assertEqual(audit['stage'], 2)
+        self.assertNotIn('editorial_fit', json.dumps(bot.page_data(self.conn)))
+        self.assertNotIn('owner_question', json.dumps(bot.page_data(self.conn)))
+
+    def seed_old_checkpoint(self, mid, outcome, paid=False):
+        old = dict(version=2, material_id=mid, input_hash=rules.input_hash(material()),
+                   rules_version='dogs-pilot-v5', prompt_version='dogs-v5', model=worker.MODEL,
+                   next_stage=1, stages=[dict(stage=1, outcome=outcome, draft=make_draft())])
+        self.conn.execute("INSERT INTO runs(service,status,note) VALUES ('worker_attempt','finished',%s)",
+                          (json.dumps(dict(version=2, material_id=mid, rules='dogs-pilot-v5', checkpoint=old)),))
+        if paid:
+            self.conn.execute("INSERT INTO runs(service,status,note) VALUES ('worker_model_call','started',%s)",
+                              (json.dumps(dict(version=2, material_id=mid, rules='dogs-pilot-v5', format_stage=1,
+                                               phase='draft' if outcome == 'generating' else 'review')),))
+        return old
+
+    def test_t16_known_old_checkpoint_starts_new_audience_assessment(self):
+        mid = self.candidate()
+        old = self.seed_old_checkpoint(mid, 'draft_ready')
+        self.assertEqual(worker.process_new(self.conn), 1)
+        self.assertEqual(self.model.call_count, 2)
+        audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0]
+        self.assertEqual(audit['migration_history'], old)
+        self.assertEqual(audit['editorial_fit']['audience'], 'general_owner')
+        self.assertEqual(audit['rules_version'], 'dogs-pilot-v6')
+
+    def test_t16_unknown_old_paid_response_is_held_without_new_calls(self):
+        mid = self.candidate()
+        self.seed_old_checkpoint(mid, 'generating', paid=True)
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.model.assert_not_called()
+        self.assertEqual(self.conn.execute("SELECT status,editorial_result->>'reason' FROM materials WHERE id=%s", (mid,)).fetchone(), ('held', 'uncertain_stage'))
+        self.assertEqual(self.count_runs('worker_model_call'), 1)
+
+    def test_t16_first_wrapper_recovers_without_duplicate_paid_draft(self):
+        self.candidate()
+        original = worker.Budget.checkpoint
+        crashed = []
+        def checkpoint(budget, run_id, audit):
+            original(budget, run_id, audit)
+            if not crashed and audit.get('stages') and audit['stages'][-1]['outcome'] == 'response_ready':
+                crashed.append(True)
+                raise RuntimeError('synthetic crash after first wrapper checkpoint')
+        with patch.object(worker.Budget, 'checkpoint', autospec=True, side_effect=checkpoint), self.assertRaises(RuntimeError):
+            worker.process_new(self.conn)
+        self.assertEqual(worker.process_new(self.conn), 1)
+        self.assertEqual([call.args[0] for call in self.model.call_args_list], ['draft', 'review'])
 
 
 if __name__ == '__main__':

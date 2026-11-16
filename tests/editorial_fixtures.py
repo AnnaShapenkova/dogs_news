@@ -3,6 +3,17 @@
 from copy import deepcopy
 
 
+def editorial_fit():
+    return dict(audience='general_owner', focus='learning',
+                owner_question='Как собаки выбирают знакомые изображения?',
+                source_quote='The dogs selected the matching image more often than the alternative image.',
+                decision='eligible', reason='owner_interest')
+
+
+def first_draft(article=None):
+    return dict(editorial_fit=editorial_fit(), article=article if article is not None else draft())
+
+
 def stage_draft(stage, number=999999991):
     value = draft(number)
     if stage == 2:
@@ -68,4 +79,4 @@ def draft(number=999999991):
 def review():
     return {"approved": True, "risk": "low", "about_dogs": True, "topic": "learning",
             "all_claims_supported": True, "no_practical_advice": True, "limitations_adequate": True,
-            "no_overclaim": True, "source_sufficient": True, "reasons": []}
+            "no_overclaim": True, "source_sufficient": True, "owner_relevant": True, "plain_language": True, "reasons": []}

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="paper">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -111,14 +111,85 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .foot { padding: 0 16px 20px; }
 
 @media (prefers-reduced-motion: reduce) { .detail, .step { animation: none; transition: none; } }
+/* T16: a quiet, playful reading room. */
+html { background: var(--bg); scroll-padding-bottom: 100px; }
+body { overflow-wrap: anywhere; }
+.app { padding-bottom: calc(94px + env(safe-area-inset-bottom)); }
+.head { padding: 24px 18px 12px; }
+.brand { align-items: center; }
+.brand-title { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.brand-pup { display: grid; place-items: center; flex: 0 0 48px; height: 52px; font-size: 31px; border-radius: 20px 20px 20px 6px; background: #e0e9db; }
+.wordmark { font-size: 27px; font-weight: 700; line-height: 1.12; letter-spacing: -.045em; text-transform: none; }
+.brand-subtitle { margin: 6px 0 0; color: var(--fg-dim); font-size: 13px; line-height: 1.4; }
+.edition-pill { font-size: 11px; padding: 6px 9px; border: 1px solid var(--rule); border-radius: 20px; white-space: nowrap; color: var(--signal); }
+.label { font-family: var(--family-body); font-size: 12px; letter-spacing: .025em; text-transform: none; line-height: 1.5; }
+.meta { padding-left: 59px; margin-top: 10px; }
+.filters { background: var(--bg); border-color: transparent; padding-top: 4px; }
+.chips { padding: 0 18px; gap: 7px; }
+.chip { min-height: 44px; padding: 9px 13px; border: 1px solid var(--rule); border-radius: 24px; background: var(--surface); font-size: 13px; }
+.chip[aria-pressed="true"] { background: var(--signal); border-color: var(--signal); color: var(--signal-fg); }
+.chip[aria-pressed="true"] .num { color: var(--signal-fg); opacity: 1; }
+.feed { padding: 12px 18px 30px; gap: 14px; }
+.item { padding: 18px; border-radius: 22px; box-shadow: 0 3px 0 #e8e1d4; transition: transform .16s ease, border-color .16s ease; }
+.item:hover { transform: translateY(-2px); }
+.line1 { font-size: 12px; justify-content: space-between; color: var(--fg-dim); }
+.story-topic { display: inline-flex; align-items: center; gap: 6px; color: var(--signal); font-weight: 600; }
+.story-topic .emoji { font-size: 19px; }
+.story-title { display: block; margin: 12px 0 16px; font-family: var(--family-display); font-size: 21px; font-weight: 600; line-height: 1.3; letter-spacing: -.025em; }
+.story-foot { display: flex; justify-content: space-between; gap: 10px; align-items: center; font-size: 11.5px; color: var(--fg-dim); }
+.story-arrow { font-size: 22px; color: var(--signal); }
+.new { background: var(--signal); border-radius: 50%; }
+.tag { font-family: var(--family-body); font-size: 12px; padding: 5px 9px; border-color: var(--rule); border-radius: 20px; }
+.nav { background: var(--bg); }
+.nav button { min-height: 74px; padding: 10px 8px; gap: 3px; }
+.nav .nav-emoji { font-size: 24px; line-height: 1.2; letter-spacing: 0; }
+.nav span { font-family: var(--family-body); font-size: 12px; letter-spacing: 0; text-transform: none; }
+.nav button[aria-current="page"] { color: var(--signal); background: #e0e9db; border-radius: 20px 20px 0 0; }
+.detail { padding: 16px 20px 30px; gap: 20px; }
+.back { font-family: var(--family-body); min-height: 44px; min-width: 64px; font-size: 14px; letter-spacing: 0; text-transform: none; color: var(--signal); }
+.pager button { width: 44px; height: 44px; border-radius: 50%; background: var(--surface); }
+.detail h2 { font-size: clamp(26px, 7vw, 34px); line-height: 1.2; letter-spacing: -.035em; }
+.detail h3 { margin: 0 0 10px; font-family: var(--family-display); font-size: 18px; font-weight: 600; }
+.detail .excerpt { font-size: 16px; line-height: 1.8; color: var(--fg-dim); }
+.detail section > .label { display: block; margin-bottom: 8px; color: var(--signal); }
+.detail .orig, .detail .excerpt { overflow-wrap: anywhere; }
+.detail a { color: var(--signal); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.limitations-panel { padding: 18px; background: #e6ecdf; border-left: 3px solid var(--signal); border-radius: 0 16px 16px 0; }
+.limitations-panel .label { display: block; margin-top: 12px; }
+.sources-panel { padding: 18px; background: var(--surface); border: 1px solid var(--rule); border-radius: 18px; }
+.sources-panel .excerpt { font-size: 13px; line-height: 1.7; }
+.btn, .reset { min-height: 48px; border-radius: 24px; }
+.empty { min-height: 45vh; justify-content: center; padding: 36px 24px; }
+.empty-emoji { font-size: 52px; line-height: 1.3; }
+.empty > p:first-of-type { font-family: var(--family-display); font-size: 22px; color: var(--fg); }
+.how { padding: 24px 20px; }
+.how h2 { font-size: 29px; }
+.stepbox { border-radius: 18px; }
+.how .foot, .foot { overflow-wrap: anywhere; }
+button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+@media (max-width: 420px) { .edition-pill { display: none; } }
+@media (max-width: 360px) {
+  .head { padding-left: 14px; padding-right: 14px; }
+  .wordmark { font-size: 25px; }
+  .feed, .chips { padding-left: 14px; padding-right: 14px; }
+  .item { padding: 15px; }
+  .detail { padding-left: 16px; padding-right: 16px; }
+  .story-title { font-size: 20px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
 </style>
 </head>
 <body>
 <div class="app">
   <header class="head" id="head">
     <div class="brand">
-      <h1 class="wordmark">Ближе к собаке</h1>
-      <span class="label">Наука рядом</span>
+      <div class="brand-title"><span class="brand-pup" aria-hidden="true">🐕</span><div>
+        <h1 class="wordmark">Ближе к собаке</h1>
+        <p class="brand-subtitle">Истории, которые помогают понимать друг друга</p>
+      </div></div>
+      <span class="edition-pill">Наука рядом</span>
     </div>
     <div class="label meta" id="meta"></div>
   </header>
@@ -132,12 +203,12 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 <nav class="nav" aria-label="Разделы">
   <div class="nav-in">
     <button data-view="feed" aria-current="page">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="5" rx="1.5"/><rect x="4" y="11" width="16" height="5" rx="1.5"/><path d="M4 20h10"/></svg>
+      <span class="nav-emoji" aria-hidden="true">🐾</span>
       <span>Лента</span>
     </button>
     <button data-view="how">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="12" r="2"/><path d="M8 6h3a3 3 0 0 1 3 3v0a3 3 0 0 0 3 3M8 18h3a3 3 0 0 0 3-3v0a3 3 0 0 1 3-3"/></svg>
-      <span>Как это получилось</span>
+      <span class="nav-emoji" aria-hidden="true">🦴</span>
+      <span>Как это устроено</span>
     </button>
   </div>
 </nav>
@@ -148,8 +219,10 @@ const DATA = /*DATA*/null/*END*/;
 const tg = window.Telegram && window.Telegram.WebApp;
 const inTelegram = !!(tg && tg.initData);
 if (inTelegram) {
-  tg.ready(); tg.expand();
-  try { tg.setHeaderColor("#0b0b0c"); tg.setBackgroundColor("#0b0b0c"); tg.setBottomBarColor && tg.setBottomBarColor("#0b0b0c"); } catch (e) {}
+  tg.ready && tg.ready(); tg.expand && tg.expand();
+  for (const method of ["setHeaderColor", "setBackgroundColor", "setBottomBarColor"]) {
+    try { if (typeof tg[method] === "function") tg[method]("#f3efe6"); } catch (e) {}
+  }
 }
 
 const $ = (s) => document.querySelector(s);
@@ -164,11 +237,11 @@ const plural = (n, one, few, many) => {
 };
 const day = (iso) => new Date(iso).toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
 const tags = (f) => (f.reason || "").split(/,\s*/).map((t) => t.trim()).filter((t) => t && t.length <= 24).slice(0, 3);
-const haptic = () => { if (inTelegram && tg.HapticFeedback) tg.HapticFeedback.selectionChanged(); };
+const haptic = () => { if (inTelegram) tg.HapticFeedback?.selectionChanged?.(); };
 
 function openLink(url) {
   if (!/^https?:\/\//i.test(url || "")) return;
-  if (inTelegram) tg.openLink(url); else window.open(url, "_blank", "noopener");
+  if (inTelegram && typeof tg.openLink === 'function') tg.openLink(url); else window.open(url, "_blank", "noopener");
 }
 
 const findings = DATA.findings;
@@ -187,6 +260,8 @@ const byTopic = (f, c) => c === "all" || f.reason === c;
 const visible = () => findings
   .filter((f) => inPeriod(f, state.period) && byTopic(f, state.topic))
   .sort((a, b) => b.date.localeCompare(a.date));
+const topicEmoji = (f) => ({ learning: "🎾", behavior: "🐕", welfare: "🐾" }[f.topic] || "🐾");
+const readerSource = (name) => ({ "Europe PMC: Dogs pilot": "Europe PMC", "ScienceDaily: Dogs": "ScienceDaily" }[name] || name);
 
 /* ---------- filters ---------- */
 function renderFilters() {
@@ -208,20 +283,20 @@ function renderFilters() {
 /* ---------- feed ---------- */
 function renderFeed() {
   if (!findings.length) {
-    return `<div class="empty"><p>Опубликованных находок пока нет.</p><p class="label">Здесь появятся материалы после допуска к публикации</p></div>`;
+    return `<div class="empty"><span class="empty-emoji" aria-hidden="true">🐶</span><p>Опубликованных находок пока нет.</p><p class="label">Здесь появятся материалы после допуска к публикации</p></div>`;
   }
   const list = visible();
   if (!list.length) {
-    return `<div class="empty"><p>По этим фильтрам находок нет.</p><button class="reset" data-reset>Сбросить фильтры</button></div>`;
+    return `<div class="empty"><span class="empty-emoji" aria-hidden="true">🦴</span><p>По этим фильтрам находок нет.</p><button class="reset" data-reset>Сбросить фильтры</button></div>`;
   }
   return `<ul class="feed">${list.map((f) => `
     <li><button class="item" data-open="${f.id}">
       <span class="line1">
         ${f.run_id === lastRun ? `<span class="new" title="из последнего прогона"></span>` : ""}
-        <span class="src">${esc(f.source)}</span><span>· ${day(f.date)}</span>
-        ${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}
+        <span class="story-topic"><span class="emoji" aria-hidden="true">${topicEmoji(f)}</span>${esc(f.reason || "О жизни собак")}</span><span>${day(f.date)}</span>
       </span>
-      <p>${esc(f.summary)}</p>
+      <span class="story-title">${esc(f.summary)}</span>
+      <span class="story-foot"><span>${esc((f.article || {}).format_label || "Познавательный разбор")}</span><span class="story-arrow" aria-hidden="true">↗</span></span>
     </button></li>`).join("")}</ul>`;
 }
 
@@ -234,25 +309,26 @@ function renderDetail(f) {
   const citations = article.citations || [];
   return `<article class="detail">
     <div class="bar">
-      ${inTelegram ? `<span class="label">${esc(f.source)}</span>` : `<button class="back" data-back>← Лента</button>`}
+      <button class="back" data-back>← Лента</button>
       <div class="pager">
         <button data-step="-1" aria-label="Предыдущая" ${at <= 0 ? "disabled" : ""}>←</button>
         <span class="num">${at + 1} из ${list.length}</span>
         <button data-step="1" aria-label="Следующая" ${at >= list.length - 1 ? "disabled" : ""}>→</button>
       </div>
     </div>
-    <span class="label">${esc(f.source)} · ${day(f.date)}${f.run_id === lastRun ? " · новое" : ""}</span>
+    <span class="story-topic"><span aria-hidden="true">${topicEmoji(f)}</span>${esc(f.reason || "О жизни собак")}</span>
     <h2>${esc(f.summary)}</h2>
+    <span class="label">${esc(readerSource(f.source))} · ${day(f.date)}${f.run_id === lastRun ? " · новая публикация" : ""}</span>
     ${article.format_label ? `<span class="label">${esc(article.format_label)}</span>` : ""}
     ${article.context_note ? `<p class="excerpt">${esc(article.context_note)}</p>` : ""}
     ${paragraphs.length ? paragraphs.map((p) => `<section>
       <span class="label">${p.kind === "interpretation" ? "Как это понимать" : "Результат исследования"}</span>
       <p class="excerpt" style="color:var(--fg)">${esc(p.text)} <a href="#source-${f.id}-1" aria-label="Источник">[1]</a></p>
     </section>`).join("") : `<p class="orig">Краткая запись прежнего формата. ${esc(f.title)}</p>`}
-    ${article.limitations ? `<section><h3>Что важно учитывать</h3><p class="excerpt">${esc(article.limitations)}</p>
+    ${article.limitations ? `<section class="limitations-panel"><h3>Что важно учитывать</h3><p class="excerpt">${esc(article.limitations)}</p>
       <p class="label">Основано на аннотации, полный текст не проверен</p></section>` : ""}
     ${tags(f).length ? `<div class="tags">${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>` : ""}
-    ${citations.length ? `<section><h3>Научный источник</h3>${citations.map((c, i) => `
+    ${citations.length ? `<section class="sources-panel"><h3>Научный источник</h3>${citations.map((c, i) => `
       <p id="source-${f.id}-${i + 1}" class="excerpt">[${i + 1}] ${esc(c.authors)}. ${esc(c.title)}.
       ${esc(c.journal)} ${esc(c.year)}.
       ${/^https?:\/\//i.test(c.url || "") ? `<a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">Открыть аннотацию</a>` : ""}
@@ -362,19 +438,19 @@ function render() {
 
   if (inTelegram) {
     if (detail) {
-      tg.BackButton.show();
-      tg.MainButton.setParams({ text: "Открыть материал", color: "#BFFF00", text_color: "#0b0b0c", is_visible: true });
+      tg.BackButton?.show?.();
+      tg.MainButton?.setParams?.({ text: "Открыть материал", color: "#315644", text_color: "#faf8f3", is_visible: true });
     } else {
-      tg.BackButton.hide();
-      tg.MainButton.hide();
+      tg.BackButton?.hide?.();
+      tg.MainButton?.hide?.();
     }
   }
 }
 
 document.querySelectorAll(".nav button").forEach((b) => b.onclick = () => go(b.dataset.view));
 if (inTelegram) {
-  tg.BackButton.onClick(closeDetail);
-  tg.MainButton.onClick(openMaterial);
+  tg.BackButton?.onClick?.(closeDetail);
+  tg.MainButton?.onClick?.(openMaterial);
 }
 
 // keyboard and swipe inside a finding

@@ -11,17 +11,18 @@ from publication import public_payload, STAGE_LABELS
 from bot.main import finding_lines
 from web.main import article_html
 from datetime import datetime, timezone
-from editorial_fixtures import material, source_record, stage_draft, review
+from editorial_fixtures import material, source_record, stage_draft, review, first_draft
 
 
 class FakeBudget:
     """Only controller I/O; real SQL persistence is covered separately and may be skipped."""
-    def __init__(self, answer=None, used=0):
+    def __init__(self, answer=None, used=0, auto_wrap=True):
         self.answer = answer or self.good_answer
         self.used = used
         self.calls = []
         self.started = set()
         self.checkpoints = []
+        self.auto_wrap = auto_wrap
 
     def good_answer(self, phase, evidence, submitted):
         return stage_draft(evidence['_stage']) if phase == 'draft' else review()
@@ -38,7 +39,10 @@ class FakeBudget:
         self.used += 1
         self.started.add((mid, evidence['_stage'], phase))
         self.calls.append((phase, deepcopy(evidence), deepcopy(submitted)))
-        return self.answer(phase, evidence, submitted)
+        value = self.answer(phase, evidence, submitted)
+        if self.auto_wrap and phase == 'draft' and '_fit' not in evidence and isinstance(value, dict) and 'editorial_fit' not in value:
+            return first_draft(value)
+        return value
 
     def checkpoint(self, attempt, audit):
         self.checkpoints.append(deepcopy(audit))

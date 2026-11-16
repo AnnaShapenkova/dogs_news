@@ -8,10 +8,10 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 
-from collector.main import fetch, plain_text, DOG_WORDS, TOPIC_WORDS
+from collector.main import fetch, plain_text, DOG_WORDS, has_animal_topic, STAFF_TRAINING
 from publication import TOPICS, FORMATS
 
-RULES_VERSION = "dogs-pilot-v5"
+RULES_VERSION = "dogs-pilot-v6"
 STAGES = {
     1: dict(words=(120, 220), paragraphs=(2, 4), claims=(1, 3)),
     2: dict(words=(80, 120), paragraphs=(1, 2), claims=(1, 2)),
@@ -159,7 +159,9 @@ def verify_source(material):
         raise Hold("unsupported_language")
     if not title or len(abstract.split()) < 100 or len(abstract) > 20000:
         raise Hold("insufficient_content")
-    if not DOG_WORDS.search(title) or not TOPIC_WORDS.search(title + " " + abstract):
+    if not has_animal_topic(title, abstract) and STAFF_TRAINING.search(title + ' ' + abstract):
+        raise Hold('clinical_focus')
+    if not DOG_WORDS.search(title) or not has_animal_topic(title, abstract):
         raise Hold("outside_pilot")
     if INJECTION.search(title + " " + abstract):
         raise Hold("untrusted_source_instructions")
@@ -201,6 +203,49 @@ def text_field(value, minimum=1, maximum=5000):
     return value.strip()
 
 
+def validate_editorial_fit(fit, evidence):
+    """An editorial decision, never scientific evidence or a publication permission."""
+    try:
+        require_keys(fit, ('audience', 'focus', 'owner_question', 'source_quote', 'decision', 'reason'))
+    except Hold:
+        raise Failure('invalid_editorial_contract') from None
+    enums = {'audience': ('general_owner', 'specialist', 'unclear'),
+             'focus': ('behavior', 'learning', 'welfare', 'clinical_methods', 'other'),
+             'decision': ('eligible', 'skip'),
+             'reason': ('owner_interest', 'specialist_clinical', 'outside_pilot', 'unclear')}
+    if (any(not isinstance(fit[key], str) or fit[key] not in options for key, options in enums.items())
+            or not isinstance(fit['owner_question'], str) or len(fit['owner_question']) > 180
+            or not isinstance(fit['source_quote'], str) or len(fit['source_quote']) > 1200):
+        raise Failure('invalid_editorial_contract')
+    if INJECTION.search(json.dumps(fit, ensure_ascii=False)):
+        raise Hold('untrusted_draft_instructions')
+    if fit['focus'] == 'clinical_methods':
+        raise Hold('clinical_focus')
+    if fit['audience'] == 'specialist':
+        raise Hold('audience_specialist')
+    if fit['focus'] == 'other' or fit['reason'] == 'outside_pilot':
+        raise Hold('outside_pilot')
+    if (fit['audience'] != 'general_owner' or fit['decision'] != 'eligible'
+            or fit['reason'] != 'owner_interest' or len(fit['owner_question'].strip()) < 10):
+        raise Hold('unclear_editorial_fit')
+    quote = normal(fit['source_quote'])
+    if len(quote.split()) < 4 or quote not in normal(evidence['abstract']):
+        raise Hold('unverified_editorial_fit')
+
+
+def unwrap_first_draft(value, evidence):
+    if not isinstance(value, dict) or set(value) != {'editorial_fit', 'article'}:
+        raise Failure('invalid_editorial_contract')
+    fit = value['editorial_fit']
+    # A rejected source cannot smuggle an article through its skip branch.
+    if isinstance(fit, dict) and fit.get('decision') == 'skip' and value['article'] is not None:
+        raise Failure('invalid_editorial_contract')
+    validate_editorial_fit(fit, evidence)
+    if not isinstance(value['article'], dict):
+        raise Failure('invalid_editorial_contract')
+    return fit, value['article']
+
+
 def validate_draft(draft, evidence, stage=None):
     bounds = STAGES[stage] if stage in STAGES else dict(words=(80, 220), paragraphs=(1, 4), claims=(1, 6))
     require_keys(draft, ("about_dogs", "topic", "format", "risk", "headline", "paragraphs", "limitations",
@@ -209,6 +254,8 @@ def validate_draft(draft, evidence, stage=None):
         raise Hold("draft_not_eligible")
     if not isinstance(draft["topic"], str) or not isinstance(draft["format"], str) or draft["topic"] not in TOPICS or draft["format"] not in FORMATS:
         raise Hold("outside_pilot")
+    if evidence.get('_fit') and draft['topic'] != evidence['_fit']['focus']:
+        raise Hold('editorial_focus_mismatch')
     headline = text_field(draft["headline"], 8, 140)
     limitations = text_field(draft["limitations"], 40, 1500)
     if not isinstance(draft['paragraphs'], list):
@@ -264,8 +311,8 @@ def validate_draft(draft, evidence, stage=None):
 
 def validate_review_contract(review):
     require_keys(review, ("approved", "risk", "about_dogs", "topic", "all_claims_supported", "no_practical_advice",
-                          "limitations_adequate", "no_overclaim", "source_sufficient", "reasons"))
-    flags = ("approved", "about_dogs", "all_claims_supported", "no_practical_advice", "limitations_adequate", "no_overclaim", "source_sufficient")
+                          "limitations_adequate", "no_overclaim", "source_sufficient", "reasons", "owner_relevant", "plain_language"))
+    flags = ("approved", "about_dogs", "all_claims_supported", "no_practical_advice", "limitations_adequate", "no_overclaim", "source_sufficient", "owner_relevant", "plain_language")
     if (any(type(review[key]) is not bool for key in flags)
             or not isinstance(review['risk'], str) or review['risk'] not in ('low', 'unknown', 'high')
             or not isinstance(review['topic'], str) or review['topic'] not in TOPICS
@@ -276,11 +323,21 @@ def validate_review_contract(review):
 
 def validate_review(review, draft):
     validate_review_contract(review)
+    if review['owner_relevant'] is not True:
+        raise Hold('audience_mismatch')
+    if (review['plain_language'] is False and review['risk'] == 'low' and review['about_dogs']
+            and review['source_sufficient'] and review['no_practical_advice']
+            and review['all_claims_supported'] and review['no_overclaim']
+            and review['limitations_adequate'] and review['topic'] == draft['topic']):
+        raise Hold('readability_failed')
     flags = ("approved", "about_dogs", "all_claims_supported", "no_practical_advice", "limitations_adequate", "no_overclaim", "source_sufficient")
     if any(review[key] is not True for key in flags) or review["risk"] != "low" or review["topic"] != draft["topic"]:
         raise Hold("review_not_approved")
     if not isinstance(review["reasons"], list) or review["reasons"]:
-        raise Hold("review_not_approved")
+        if review['plain_language'] is True:
+            raise Hold("review_not_approved")
+    if review['plain_language'] is not True:
+        raise Hold('readability_failed')
 
 
 def publication_payload(draft, evidence, stage=None):

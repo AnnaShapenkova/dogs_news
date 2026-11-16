@@ -1,4 +1,6 @@
-# Проверки T01–T03 и T12–T15
+# Проверки T01–T03 и T12–T16
+
+T16: `python -m unittest discover -s tests -p 'test_*.py' -q` — 158 тестов: 101 пройден, 57 PostgreSQL-тестов пропущены без TEST_DATABASE_URL. `node tests/test_mini_app.js` — два сценария; `node tests/test_mini_app_t16.js` — светлая тема, Telegram с тёмной темой/неполным API, навигация/фильтры, эмодзи и контраст заданных пар цветов. [Отчёт T16](T16_RESULTS.md). Визуальная проверка реального браузера и Telegram не выполнена из-за ограничений среды; DOM-заглушка не проверяет размеры/скролл CSS.
 
 T15: `python -m unittest discover -s tests -p 'test_*.py' -q` — 140 тестов: 89 пройдены, 51 PostgreSQL-тест пропущен без TEST_DATABASE_URL. `node tests/test_mini_app.js` — оба сценария пройдены, включая метку научной заметки и ограничения. [Отчёт T15](T15_RESULTS.md). test_t15.py проверяет конечный контроллер трёх ступеней с FakeBudget — это не PostgreSQL. В test_editorial_database.py добавлены реальные SQL-сценарии этапов, продолжения, восстановления и бюджета; они пока пропущены. Все внешние модельные/сетевые/Telegram-вызовы подменены.
 

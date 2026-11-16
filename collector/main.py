@@ -47,6 +47,15 @@ NON_ANIMAL_TOPICS = re.compile(
     r"\b(?:biological|cellular|tumou?r|stationary)\s+behaviou?r\b|"
     r"\b(?:машинн[а-яё]*|глубок[а-яё]*)\s+обуч[а-яё]*\b", re.I
 )
+STAFF_TRAINING = re.compile(
+    r'\b(?:[a-z]+-)*trained\s+(?:veterinarians?|clinicians?|cardiologists?|personnel|staff|veterinary\s+(?:students?|surgeons?))\b|'
+    r'\btraining\s+(?:of|for)\s+(?:veterinarians?|clinicians?|cardiologists?|veterinary\s+(?:students?|surgeons?))\b|'
+    r'\b(?:обучени[ея]|подготовк[аиу])\s+(?:ветеринар[а-яё]*|кардиолог[а-яё]*|врач[а-яё]*)\b', re.I)
+
+
+def has_animal_topic(title, text):
+    combined = title + ' ' + text
+    return bool(TOPIC_WORDS.search(STAFF_TRAINING.sub(' ', NON_ANIMAL_TOPICS.sub(' ', combined))))
 # Explicit, inspectable discovery query. It is not an editorial quality assessment.
 EUROPEPMC_TERMS = (
     '(TITLE:dog OR TITLE:dogs OR TITLE:canine OR TITLE:"Canis familiaris" OR TITLE:"Canis lupus familiaris"'
@@ -182,8 +191,7 @@ def candidate(title, text, url, published, payload, scope, today, research=False
     if not (oldest or today - timedelta(days=LOOKBACK_DAYS - 1)) <= published.date() <= (newest or today):
         raise InvalidRecord("outside_window")
     combined = title + " " + text
-    topic_text = NON_ANIMAL_TOPICS.sub(" ", combined)
-    if not DOG_WORDS.search(title if research else combined) or not TOPIC_WORDS.search(topic_text):
+    if not DOG_WORDS.search(title if research else combined) or not has_animal_topic(title, text):
         raise InvalidRecord("outside_topic")
     return {"title": title, "text": text, "url": url, "published_at": published,
             "raw_payload": payload, "content_scope": scope if text else "metadata_only"}

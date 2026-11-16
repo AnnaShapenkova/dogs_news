@@ -211,6 +211,14 @@ def status_text(conn):
         'model_unavailable_or_invalid_json': 'ошибка ответа модели', 'source_changed': 'содержание источника изменилось',
     }
     reason_names.update({
+        'clinical_focus': 'клиническая задача для специалистов',
+        'audience_specialist': 'материал для профессиональной аудитории',
+        'audience_mismatch': 'не подходит обычному владельцу',
+        'unclear_editorial_fit': 'неясная польза для читателя',
+        'unverified_editorial_fit': 'редакционный вопрос не подтверждён источником',
+        'invalid_editorial_contract': 'ошибка формата редакционной оценки',
+        'editorial_focus_mismatch': 'тема текста не совпала с редакционным отбором',
+        'readability_failed': 'нужен более понятный язык',
         'evergreen_as_news': 'давнее исследование представлено новой новостью',
         'invalid_model_contract': 'ответ модели нарушает формат данных',
         'model_invalid_contract': 'модель вернула не объект JSON',

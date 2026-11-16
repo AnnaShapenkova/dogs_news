@@ -195,3 +195,21 @@
   ::selection { background: var(--marker); color: var(--marker-fg); }
 }
 
+/* T16: warm paper, shared by every reader screen and Telegram chrome. */
+html[data-theme="paper"] {
+  color-scheme: light;
+  --bg: #f3efe6;
+  --surface: #faf8f3;
+  --surface-2: #ece6d8;
+  --fg: #1a1712;
+  --fg-dim: #5c574a;
+  --fg-faint: #6b665a;
+  --rule: #d6cfbe;
+  --rule-strong: #8f8873;
+  --signal: #315644;
+  --signal-fg: #faf8f3;
+  --marker: #e0e9db;
+  --marker-fg: #1a1712;
+  --focus: #315644;
+}
+
