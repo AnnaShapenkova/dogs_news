@@ -11,10 +11,10 @@ from datetime import date, datetime, timedelta, timezone
 from collector.main import fetch, plain_text, DOG_WORDS, has_animal_topic, STAFF_TRAINING
 from publication import TOPICS, FORMATS
 
-RULES_VERSION = "dogs-pilot-v6"
+RULES_VERSION = "dogs-pilot-v7"
 STAGES = {
-    1: dict(words=(120, 220), paragraphs=(2, 4), claims=(1, 3)),
-    2: dict(words=(80, 120), paragraphs=(1, 2), claims=(1, 2)),
+    1: dict(words=(60, 120), paragraphs=(1, 3), claims=(1, 3)),
+    2: dict(words=(40, 100), paragraphs=(1, 3), claims=(1, 3)),
     3: dict(words=(40, 80), paragraphs=(1, 1), claims=(1, 1)),
 }
 API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
@@ -107,6 +107,23 @@ def secondary_identifiers(record):
 
 
 def verify_source(material):
+    payload = material.get('raw_payload') or {}
+    if not isinstance(payload, dict):
+        raise Hold('insufficient_content')
+    if payload.get('provider') in ('rkf', 'pets'):
+        from worker.evidence import verify_page
+        return verify_page(material, fetch)
+    if payload.get('provider') == 'plos':
+        from worker.evidence import verify_plos
+        return verify_plos(material, fetch)
+    from worker.evidence import enrich, CLINICAL
+    evidence = verify_europepmc(material)
+    if CLINICAL.search(evidence['title']):
+        raise Hold('specialist_clinical')
+    return enrich(evidence)
+
+
+def verify_europepmc(material):
     payload = material.get("raw_payload")
     if not isinstance(payload, dict) or material.get("content_scope") not in ("abstract", "feed_excerpt"):
         raise Hold("insufficient_content")
@@ -151,9 +168,9 @@ def verify_source(material):
     if not isinstance(types, list) or not types or any(not isinstance(t, str) for t in types):
         raise Hold("unknown_publication_status")
     type_text = " ".join(types).lower()
-    if any(word in type_text for word in ("retract", "erratum", "correct", "preprint", "withdraw", "concern", "review", "meta-analysis")) or record.get("commentCorrectionList"):
-        raise Hold("publication_requires_review")
-    if "journal article" not in type_text or record.get("publicationStatus") not in ("ppublish", "epublish", "aheadofprint", "published"):
+    if any(word in type_text for word in ("retract", "erratum", "correct", "preprint", "withdraw", "concern")) or record.get("commentCorrectionList"):
+        raise Hold("retracted_source" if "retract" in type_text or "withdraw" in type_text else "unknown_source_status")
+    if not any(t in type_text for t in ("journal article", "review", "meta-analysis")) or record.get("publicationStatus") not in ("ppublish", "epublish", "aheadofprint", "published"):
         raise Hold("unknown_publication_status")
     if record.get("language") not in ("eng", "rus"):
         raise Hold("unsupported_language")
@@ -185,6 +202,8 @@ def verify_source(material):
             "doi": verified_doi, "title": title, "abstract": abstract,
             "url": f"https://europepmc.org/article/MED/{record['id']}",
             "authors": record.get("authorString") or "", "journal": journal.get("title") or "",
+            "source_language": "ru" if record.get('language') == 'rus' else 'en',
+            "publication_type": type_text,
             "year": record.get("pubYear") or "", "request_url": request_url,
             "evidence_scope": "abstract", "risk_signals": risk_signals(title + " " + abstract),
             "research_date": research_date,
@@ -210,7 +229,7 @@ def validate_editorial_fit(fit, evidence):
     except Hold:
         raise Failure('invalid_editorial_contract') from None
     enums = {'audience': ('general_owner', 'specialist', 'unclear'),
-             'focus': ('behavior', 'learning', 'welfare', 'clinical_methods', 'other'),
+             'focus': ('behavior', 'learning', 'welfare', 'nutrition', 'clinical_methods', 'other'),
              'decision': ('eligible', 'skip'),
              'reason': ('owner_interest', 'specialist_clinical', 'outside_pilot', 'unclear')}
     if (any(not isinstance(fit[key], str) or fit[key] not in options for key, options in enums.items())
@@ -246,105 +265,4 @@ def unwrap_first_draft(value, evidence):
     return fit, value['article']
 
 
-def validate_draft(draft, evidence, stage=None):
-    bounds = STAGES[stage] if stage in STAGES else dict(words=(80, 220), paragraphs=(1, 4), claims=(1, 6))
-    require_keys(draft, ("about_dogs", "topic", "format", "risk", "headline", "paragraphs", "limitations",
-                         "claims", "needs_full_text", "contains_practical_advice"))
-    if draft["about_dogs"] is not True or draft["risk"] != "low" or draft["needs_full_text"] is not False or draft["contains_practical_advice"] is not False:
-        raise Hold("draft_not_eligible")
-    if not isinstance(draft["topic"], str) or not isinstance(draft["format"], str) or draft["topic"] not in TOPICS or draft["format"] not in FORMATS:
-        raise Hold("outside_pilot")
-    if evidence.get('_fit') and draft['topic'] != evidence['_fit']['focus']:
-        raise Hold('editorial_focus_mismatch')
-    headline = text_field(draft["headline"], 8, 140)
-    limitations = text_field(draft["limitations"], 40, 1500)
-    if not isinstance(draft['paragraphs'], list):
-        raise Hold('invalid_model_contract')
-    if not bounds['paragraphs'][0] <= len(draft["paragraphs"]) <= bounds['paragraphs'][1]:
-        raise Hold('invalid_article_length')
-    if not isinstance(draft["claims"], list) or not 1 <= len(draft['claims']) <= 6:
-        raise Hold("invalid_model_contract")
-    if not bounds['claims'][0] <= len(draft['claims']) <= bounds['claims'][1]:
-        raise Hold('invalid_stage_claim_count')
-    claim_ids = set()
-    for claim in draft["claims"]:
-        require_keys(claim, ("id", "text", "quote", "source_id"))
-        identifier = text_field(claim["id"], 1, 20)
-        if not re.fullmatch(r"c[1-6]", identifier) or identifier in claim_ids or claim["source_id"] != evidence["source_id"]:
-            raise Hold("unverified_claim")
-        claim_ids.add(identifier)
-        text_field(claim["text"], 10, 1000)
-        quote = text_field(claim["quote"], 15, 1200)
-        if len(quote.split()) < 4 or normal(quote) not in normal(evidence["abstract"]):
-            raise Hold("unverified_claim")
-    paragraphs = []
-    used_ids = set()
-    for paragraph in draft["paragraphs"]:
-        require_keys(paragraph, ("kind", "text", "claim_ids"))
-        refs = paragraph["claim_ids"]
-        if paragraph["kind"] not in ("result", "interpretation") or not isinstance(refs, list) or not refs or any(not isinstance(r, str) or r not in claim_ids for r in refs):
-            raise Hold("unverified_claim")
-        if stage in (2, 3) and paragraph['kind'] != 'result':
-            raise Hold('unsupported_interpretation')
-        used_ids.update(refs)
-        paragraphs.append(text_field(paragraph["text"], 20, 2500))
-    if used_ids != claim_ids or not bounds['words'][0] <= len(" ".join(paragraphs).split()) <= bounds['words'][1]:
-        raise Hold("invalid_article_length")
-    public_text = " ".join([headline, *paragraphs, limitations])
-    if evidence.get('is_evergreen') and re.search(
-            r'\b(?:нов[а-яё]*\s+(?:исследован[а-яё]*|открыти[а-яё]*|новост[а-яё]*)|свеж[а-яё]*\s+(?:исследован[а-яё]*|новост[а-яё]*))\b',
-            public_text, re.I):
-        raise Hold('evergreen_as_news')
-    if policy_signals(public_text):
-        raise Hold("risk_requires_review")
-    if 'http' in public_text.lower() or re.search(r'<\s*/?\s*(?:script|iframe|img|a)\b', public_text, re.I):
-        raise Hold("unverified_link")
-    cyrillic = len(re.findall(r'[а-яё]', public_text, re.I))
-    if cyrillic < len(re.findall(r'[a-zа-яё]', public_text, re.I)) / 2:
-        raise Hold("not_russian")
-    allowed_numbers = set(re.findall(r'\d+', evidence["abstract"] + " " + evidence["title"] + " " + str(evidence["year"])))
-    if set(re.findall(r'\d+', public_text)) - allowed_numbers:
-        raise Hold("unverified_number")
-    if not re.search(r'аннотаци|реферат', limitations, re.I):
-        raise Hold("missing_evidence_scope")
-
-
-def validate_review_contract(review):
-    require_keys(review, ("approved", "risk", "about_dogs", "topic", "all_claims_supported", "no_practical_advice",
-                          "limitations_adequate", "no_overclaim", "source_sufficient", "reasons", "owner_relevant", "plain_language"))
-    flags = ("approved", "about_dogs", "all_claims_supported", "no_practical_advice", "limitations_adequate", "no_overclaim", "source_sufficient", "owner_relevant", "plain_language")
-    if (any(type(review[key]) is not bool for key in flags)
-            or not isinstance(review['risk'], str) or review['risk'] not in ('low', 'unknown', 'high')
-            or not isinstance(review['topic'], str) or review['topic'] not in TOPICS
-            or not isinstance(review['reasons'], list) or len(review['reasons']) > 6
-            or any(not isinstance(reason, str) or not 1 <= len(reason) <= 500 for reason in review['reasons'])):
-        raise Hold('review_not_approved')
-
-
-def validate_review(review, draft):
-    validate_review_contract(review)
-    if review['owner_relevant'] is not True:
-        raise Hold('audience_mismatch')
-    if (review['plain_language'] is False and review['risk'] == 'low' and review['about_dogs']
-            and review['source_sufficient'] and review['no_practical_advice']
-            and review['all_claims_supported'] and review['no_overclaim']
-            and review['limitations_adequate'] and review['topic'] == draft['topic']):
-        raise Hold('readability_failed')
-    flags = ("approved", "about_dogs", "all_claims_supported", "no_practical_advice", "limitations_adequate", "no_overclaim", "source_sufficient")
-    if any(review[key] is not True for key in flags) or review["risk"] != "low" or review["topic"] != draft["topic"]:
-        raise Hold("review_not_approved")
-    if not isinstance(review["reasons"], list) or review["reasons"]:
-        if review['plain_language'] is True:
-            raise Hold("review_not_approved")
-    if review['plain_language'] is not True:
-        raise Hold('readability_failed')
-
-
-def publication_payload(draft, evidence, stage=None):
-    return {"version": 1, "evidence_key": evidence["evidence_key"], "topic": draft["topic"],
-            "format": "explainer" if evidence.get('is_evergreen') else draft["format"],
-            "research_date": evidence.get('research_date', ''), "is_evergreen": evidence.get('is_evergreen', False),
-            "stage": stage if type(stage) is int and stage in STAGES else None,
-            "paragraphs": [{"kind": p["kind"], "text": p["text"]} for p in draft["paragraphs"]],
-            "limitations": draft["limitations"], "evidence_scope": "abstract",
-            "citations": [{key: str(evidence.get(key) or "") for key in ("title", "authors", "journal", "year", "doi", "url")}]}
+from worker.contracts import validate_draft, validate_review_contract, validate_review, publication_payload

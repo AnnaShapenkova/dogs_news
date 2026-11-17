@@ -77,7 +77,23 @@ def say(chat_id, text, button=True):
                 [{"text": "Открыть ленту", "web_app": {"url": page_url()}}]
             ]
         }
-    api("sendMessage", payload)
+    # A five-card digest can exceed Telegram's per-message limit. Split at card boundaries.
+    from collector.main import plain_text
+    chunks, current = [], ''
+    for block in text.split('\n\n'):
+        if len(block.encode('utf-16-le')) > 7200:
+            plain = plain_text(block)
+            blocks = [html.escape(plain[i:i + 1700]) for i in range(0, len(plain), 1700)]
+        else:
+            blocks = [block]
+        for part in blocks:
+            joined = current + ('\n\n' if current else '') + part
+            if current and len(joined.encode('utf-16-le')) > 7600:
+                chunks.append(current); current = part
+            else: current = joined
+    if current: chunks.append(current)
+    for chunk in chunks:
+        api("sendMessage", {**payload, 'text': chunk})
 
 
 def finding_lines(rows):
@@ -88,13 +104,19 @@ def finding_lines(rows):
         context = article.get('context_note', '')
         link = safe_url(url)
         heading = f'<a href="{html.escape(link)}">{html.escape(summary)}</a>' if link else html.escape(summary)
-        line = f'• {heading}\n  {html.escape(source)}'
+        display_source = article.get('attribution') or source
+        line = f'• {heading}\n  {html.escape(display_source)}'
         if entity:
             line += f" · {html.escape(entity)}"
         if context:
             line += '\n  ' + html.escape(context)
         if article.get('stage'):
             line += '\n  ' + html.escape(article['format_label'])
+        if article.get('version') == 2:
+            line += '\n' + html.escape(' '.join(p['text'] for p in article['paragraphs']))
+            original = safe_url(article['original_url'])
+            line += f'\n<a href="{html.escape(original, quote=True)}">Читать оригинал</a>'
+            if article['source_language'] == 'en': line += ' · на английском'
         lines.append(line)
     return lines
 
@@ -197,7 +219,8 @@ def status_text(conn):
     ).fetchone()
     lines.append(f"\nВсего находок {findings}, подписчиков {subscribers}.")
     states = dict(conn.execute("SELECT status,count(*) FROM materials GROUP BY status").fetchall())
-    lines.append(f"Ожидают проверки: {states.get('collected', 0)}; удержаны: {states.get('held', 0)}; ошибки: {states.get('error', 0)}.")
+    lines.append(f"Очередь автообработки: {states.get('collected', 0)}; удержано автоматикой: {states.get('held', 0)}; ошибки: {states.get('error', 0)}.")
+    lines.append('Удержанные материалы не переданы человеку. Исторические итоги всех версий:')
     reasons = conn.execute(
         "SELECT editorial_result->>'reason',count(*) FROM materials WHERE status IN ('held','error')"
         " AND editorial_result IS NOT NULL GROUP BY 1 ORDER BY count(*) DESC LIMIT 8"
@@ -211,6 +234,16 @@ def status_text(conn):
         'model_unavailable_or_invalid_json': 'ошибка ответа модели', 'source_changed': 'содержание источника изменилось',
     }
     reason_names.update({
+        'specialist_clinical': 'профессиональная клиническая задача',
+        'outside_topics': 'вне выбранных тем', 'unsafe_advice': 'опасная или неопределённая рекомендация',
+        'unsupported_claim': 'нет подтверждения вывода', 'unknown_source_status': 'не подтверждён статус источника',
+        'retracted_source': 'работа отозвана или есть сомнения в статусе',
+        'source_kind_mismatch': 'тип текста не соответствует источнику',
+        'commercial_content': 'рекламное содержание', 'overclaim': 'вывод сильнее доказательств',
+        'unexpected_advice': 'совет вместо объяснения', 'invalid_review_contract': 'неверный формат проверки',
+        'source_license_unverified': 'не подтверждена лицензия',
+        'missing_primary_event': 'не найдено первичное сообщение о событии',
+        'outside_news_window': 'событие вне новостного окна',
         'clinical_focus': 'клиническая задача для специалистов',
         'audience_specialist': 'материал для профессиональной аудитории',
         'audience_mismatch': 'не подходит обычному владельцу',
@@ -233,9 +266,21 @@ def status_text(conn):
         'model_response_too_large': 'превышен размер ответа модели',
     })
     for reason, count in reasons:
-        lines.append(f"• {reason_names.get(reason, 'нужна дополнительная проверка')}: {count}")
+        lines.append(f"• {reason_names.get(reason, 'историческая причина: ' + html.escape(str(reason)))}: {count}")
     from worker.budget import budget_status, budget_text
-    lines.append(budget_text(budget_status(conn)))
+    state = budget_status(conn)
+    lines.append(budget_text(state))
+    from worker.budget import TARGET_PUBLICATIONS
+    lines.append(f"Текущий выпуск UTC: {state['publications']} из цели {TARGET_PUBLICATIONS}; до цели осталось {max(0, TARGET_PUBLICATIONS-state['publications'])}. День ещё не завершён.")
+    queue = conn.execute("""SELECT coalesce(raw_payload->>'topic_hint','не определена'),count(*)
+        FROM materials WHERE status='collected' GROUP BY 1 ORDER BY 1""").fetchall()
+    lines.append('Темы очереди (предварительно): ' + ', '.join(f'{TOPICS.get(t,t)}: {n}' for t,n in queue))
+    from worker.planning import distribution
+    topics, _ = distribution(conn)
+    lines.append('Опубликовано сегодня по темам: ' + ', '.join(f'{TOPICS.get(t,t)}: {n}' for t,n in sorted(topics.items())))
+    deferred = conn.execute("""SELECT count(*) FROM materials WHERE status='collected'
+        AND editorial_result->>'reason' IN ('model_daily_limit','stage_model_budget','attempt_daily_limit','publication_daily_limit')""").fetchone()[0]
+    lines.append(f'Из очереди отложено по бюджету: {deferred}. Причины недобора: лимиты выше; отказы/ошибки текущей версии ниже; состояние источников — в строке сбора.')
     from worker.provider import provider_status, provider_text
     lines.append(provider_text(provider_status(conn)))
     from worker.editorial import RULES_VERSION
@@ -260,7 +305,7 @@ def status_text(conn):
                'invalid_stage_claim_count': 'неверное число выводов',
                'unsupported_interpretation': 'для формата нужна только информация о результате'}
     for stage, state, reason, phase, count in decisions:
-        text = details.get(reason, reason_names.get(reason, 'требуется проверка'))
+        text = details.get(reason, reason_names.get(reason, html.escape(str(reason or 'причина не указана'))))
         lines.append(f"• {labels.get(stage, 'Материал')} / {phases.get(phase, 'проверка')}: "
                      f"{outcomes.get(state, 'проверяется')} {count} — {text}.")
     if not decisions:
@@ -286,7 +331,7 @@ def handle(conn, message):
             " WHERE f.publication_status = 'published' ORDER BY f.id DESC LIMIT 5"
         ).fetchall()
         latest = [(summary, TOPICS.get(topic, ''), url, source, payload) for summary, topic, url, source, payload in latest]
-        text = "Вы подписаны на «Ближе к собаке». Здесь будут проверенные объяснения исследований о поведении, обучении и благополучии собак."
+        text = "Вы подписаны на «Ближе к собаке». Здесь — интересные истории о собаках, обучении, повседневной жизни и питании: кратко, понятно и со ссылками на источники."
         if latest:
             text += "\n\nПоследние:\n\n" + "\n\n".join(finding_lines(latest))
         text += "\n\nВсе находки в ленте: кнопка ниже или «Лента» рядом с полем ввода. /status покажет, как работают блоки."

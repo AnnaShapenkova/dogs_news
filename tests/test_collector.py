@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
+from urllib.parse import parse_qs, urlsplit
 from xml.sax.saxutils import escape
 
 import psycopg
@@ -97,7 +98,7 @@ class ReaderTests(unittest.TestCase):
 
     def test_topic_and_word_boundaries(self):
         examples = [('Cat welfare', False), ('Dogma and behaviour', False),
-                    ('Dog nutrition', False), ('Dogs and cognition', True),
+                    ('Dog genomic biomarkers', False), ('Dogs and cognition', True),
                     ('Canine enrichment', True), ('Обучение собак', True),
                     ('Благополучие псов', True),
                     ('Canine MRI with deep learning', False),
@@ -180,11 +181,11 @@ class ReaderTests(unittest.TestCase):
                     self.requested = size
                     return b'x' * size
             yield Response()
-        with patch('urllib.request.urlopen', side_effect=response) as network:
+        with patch('urllib.request.OpenerDirector.open', side_effect=response) as network:
             with self.assertRaisesRegex(ValueError, 'response_too_large'):
                 collector.fetch(RSS_URL)
-        self.assertEqual(network.call_args.kwargs['timeout'], 30)
-        with patch('urllib.request.urlopen') as network:
+        self.assertEqual(network.call_args.kwargs['timeout'], 15)
+        with patch('urllib.request.OpenerDirector.open') as network:
             with self.assertRaisesRegex(ValueError, 'invalid_source_url'):
                 collector.fetch('file:///private')
             network.assert_not_called()
@@ -211,16 +212,30 @@ class CollectorDatabaseTests(unittest.TestCase):
         self.log_patch = patch.object(db, 'log').start()
         self.addCleanup(patch.stopall)
         patch('urllib.request.urlopen', side_effect=AssertionError('External HTTP forbidden in tests')).start()
+        patch('urllib.request.OpenerDirector.open', side_effect=AssertionError('External HTTP forbidden in tests')).start()
+        patch('collector.sources.time.sleep').start()
+        patch.dict(os.environ, {'OPENROUTER_API_KEY': ''}).start()
 
     def init(self):
         db.init_schema(self.conn)
+        # These historical SQL allocation tests isolate the original two publishers.
+        # New defaults/migration are exercised without disabling them in test_t17_database.
+        self.conn.execute("UPDATE sources SET active=false WHERE name=ANY(%s)",
+                          (['RKF: Owner guides','Pets: Learning','Pets: Nutrition','PLOS: Dogs'],))
 
     def read_network(self, science=20, articles=20, error=None):
         def fetch(url):
+            if url.endswith('/robots.txt'): return b'User-agent: *\nDisallow:\n'
             if url.startswith(API_URL):
                 if error == 'science':
                     raise OSError('science unavailable')
-                return api_page([record(i) for i in range(min(science, 15))])
+                from urllib.parse import parse_qs, urlsplit
+                params = parse_qs(urlsplit(url).query)
+                if 'TO ' + TODAY.isoformat() + ']' not in params['query'][0]: return api_page([])
+                cursor = params['cursorMark'][0]
+                offset = 0 if cursor == '*' else int(cursor)
+                records = [record(i) for i in range(offset,min(science,offset+15))]
+                return api_page(records, **({'nextCursorMark':str(offset+15)} if offset+15<science else {}))
             return rss(*(rss_item(i) for i in range(articles)))
         return patch.object(collector, 'fetch', side_effect=fetch)
 
@@ -266,9 +281,9 @@ class CollectorDatabaseTests(unittest.TestCase):
     def test_total_limit_quotas_and_collected_state(self):
         self.init()
         with self.read_network():
-            self.assertEqual(collector.collect(self.conn, TODAY), 15)
+            self.assertEqual(collector.collect(self.conn, TODAY), 30)
         rows = self.conn.execute('SELECT s.name,count(*) FROM materials m JOIN sources s ON s.id=m.source_id GROUP BY s.name').fetchall()
-        self.assertEqual(dict(rows), {collector.RESEARCH_SOURCE: 10, collector.ARTICLE_SOURCE: 5})
+        self.assertEqual(dict(rows), {collector.RESEARCH_SOURCE: 17, collector.ARTICLE_SOURCE: 13})
         self.assertEqual(self.conn.execute('SELECT DISTINCT status FROM materials').fetchall(), [('collected',)])
         with patch.object(worker, 'ask_model') as model:
             worker.process_new(self.conn)
@@ -284,13 +299,20 @@ class CollectorDatabaseTests(unittest.TestCase):
             self.assertEqual(collector.collect(self.conn, TODAY), 0)
         self.assertEqual(self.conn.execute('SELECT url,text,raw_payload,status,collected_at FROM materials ORDER BY id').fetchall(), before)
         pages = [api_page([record(i) for i in range(15)], nextCursorMark='next'), api_page([record(99)])]
-        with patch.object(collector, 'fetch', side_effect=lambda url: pages.pop(0) if url.startswith(API_URL) else rss()):
+        def fetch(url):
+            if url.endswith('/robots.txt'): return b'User-agent: *\nDisallow:\n'
+            if url.startswith(API_URL):
+                if 'TO ' + TODAY.isoformat() + ']' not in parse_qs(urlsplit(url).query)['query'][0]:
+                    return api_page([])
+                return pages.pop(0)
+            return rss()
+        with patch.object(collector, 'fetch', side_effect=fetch):
             self.assertEqual(collector.collect(self.conn, TODAY), 1)
 
     def test_reallocation_and_single_source_failure(self):
         self.init()
         with self.read_network(error='science'):
-            self.assertEqual(collector.collect(self.conn, TODAY), 15)
+            self.assertEqual(collector.collect(self.conn, TODAY), 20)
         status, note = self.conn.execute('SELECT status,note FROM runs ORDER BY id DESC LIMIT 1').fetchone()
         self.assertEqual(status, 'finished')
         self.assertIn('science unavailable', note)
@@ -317,6 +339,7 @@ class CollectorDatabaseTests(unittest.TestCase):
         self.init()
         from urllib.parse import parse_qs, urlsplit
         def fetch(url):
+            if url.endswith('/robots.txt'): return b'User-agent: *\nDisallow:\n'
             if not url.startswith(API_URL):
                 return rss()
             query = parse_qs(urlsplit(url).query)['query'][0]
@@ -354,13 +377,17 @@ class AllocationTests(unittest.TestCase):
             return True
 
         def batch(prefix, count, error):
-            return collector.Batch(items=[{'url': f'{prefix}/{i}'} for i in range(count)],
+            return collector.Batch(items=[{'url': f'{prefix}/{i}', 'content_scope': 'feed_excerpt', 'published_at': datetime(2026,11,12,tzinfo=timezone.utc)} for i in range(count)],
                                    scanned=count, read_ok=error is None, error=error)
         readers = {
             'europepmc': lambda url, today: batch('research', science, science_error),
             'rss': lambda url, today: batch('article', articles, rss_error),
         }
-        with patch.dict(collector.READERS, readers), patch.object(collector, 'save_candidate', side_effect=save), \
+        def science_iterator(conn, name, kind, url, today, http, stats):
+            value = readers['europepmc'](url, today)
+            stats.update(read_ok=value.read_ok, scanned=value.scanned, error=value.error)
+            yield from value.items
+        with patch('collector.sources.api_candidates', side_effect=science_iterator), patch.object(collector, 'read_rss', side_effect=lambda url,today,fetcher=None: readers['rss'](url,today)), patch.object(collector, 'save_candidate', side_effect=save), \
                 patch.object(db, 'start_run', return_value=1), patch.object(db, 'finish_run') as finished, \
                 patch.object(db, 'fail_run') as failed:
             try:
@@ -371,27 +398,27 @@ class AllocationTests(unittest.TestCase):
                 raise
         return total, inserted, finished.call_args.args[-1]
 
-    def test_two_groups_share_a_total_limit_of_fifteen(self):
+    def test_two_groups_share_a_total_limit_of_thirty(self):
         total, inserted, note = self.run_collection()
-        self.assertEqual(total, 15)
-        self.assertEqual(sum(sid == 1 for sid, _ in inserted), 10)
-        self.assertEqual(sum(sid == 2 for sid, _ in inserted), 5)
-        self.assertIn('общий лимит 15', note)
+        self.assertEqual(total, 30)
+        self.assertEqual(sum(sid == 1 for sid, _ in inserted), 17)
+        self.assertEqual(sum(sid == 2 for sid, _ in inserted), 13)
+        self.assertIn('новых кандидатов: 30', note)
 
     def test_unused_research_slots_go_to_articles(self):
         total, inserted, _ = self.run_collection(science=2)
-        self.assertEqual(total, 15)
-        self.assertEqual(sum(sid == 2 for sid, _ in inserted), 13)
+        self.assertEqual(total, 30)
+        self.assertEqual(sum(sid == 2 for sid, _ in inserted), 28)
 
     def test_unused_article_slots_go_to_research(self):
         total, inserted, _ = self.run_collection(articles=1)
-        self.assertEqual(total, 15)
-        self.assertEqual(sum(sid == 1 for sid, _ in inserted), 14)
+        self.assertEqual(total, 30)
+        self.assertEqual(sum(sid == 1 for sid, _ in inserted), 29)
 
     def test_duplicates_do_not_consume_new_record_budget(self):
         seen = [f'research/{i}' for i in range(15)] + [f'article/{i}' for i in range(5)]
         total, inserted, note = self.run_collection(seen=seen)
-        self.assertEqual(total, 15)
+        self.assertEqual(total, 30)
         self.assertTrue(set(url for _, url in inserted).isdisjoint(seen))
         self.assertIn('дублей 15', note)
 
@@ -400,7 +427,7 @@ class AllocationTests(unittest.TestCase):
 
     def test_one_failure_still_collects_from_other_source(self):
         total, inserted, note = self.run_collection(science=0, science_error='offline')
-        self.assertEqual(total, 15)
+        self.assertEqual(total, 30)
         self.assertTrue(all(sid == 2 for sid, _ in inserted))
         self.assertIn('offline', note)
 

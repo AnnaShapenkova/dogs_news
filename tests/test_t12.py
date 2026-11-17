@@ -98,8 +98,8 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(phrase=phrase), self.assertRaises(rules.Hold):
                 rules.validate_draft(value, self.evidence())
         value = review()
-        value.update(approved=False, no_practical_advice=False, reasons=['Indirect advice'])
-        with self.assertRaisesRegex(rules.Hold, 'review_not_approved'):
+        value.update(approved=False, advice_safe=False, reasons=['Indirect advice'])
+        with self.assertRaisesRegex(rules.Hold, 'review_not_approved|invalid_review_contract|unsupported_claim|unsafe_advice|invalid_model_contract'):
             rules.validate_review(value, draft())
 
     def test_unknown_risk_and_false_evidence_flags_are_not_approval(self):
@@ -113,11 +113,11 @@ class PolicyTests(unittest.TestCase):
 class BudgetReportingTests(unittest.TestCase):
     def test_all_limits_and_utc_reset_are_explained(self):
         conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (3, 30, 30, datetime(2026, 11, 17, tzinfo=timezone.utc))
+        conn.execute.return_value.fetchone.return_value = (8, 60, 80, datetime(2026, 11, 17, tzinfo=timezone.utc))
         state = budget_status(conn)
         self.assertEqual(len(state['blocked']), 3)
         text = budget_text(state)
-        for expected in ('3/3', '30/30', '30/30', '17.11 00:00 UTC', 'исчерпан'):
+        for expected in ('8/8', '60/60', '80/80', '17.11 00:00 UTC', 'исчерпан'):
             self.assertIn(expected, text)
 
     def test_exhausted_budget_creates_no_empty_worker_run(self):

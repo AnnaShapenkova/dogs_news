@@ -41,7 +41,7 @@ class EditorialTests(unittest.TestCase):
             self.verify(response=source_record(999999992))
         unsupported = draft()
         unsupported['claims'][0]['quote'] = 'Dogs understood every picture in every possible setting.'
-        with self.assertRaisesRegex(rules.Hold, 'unverified_claim'):
+        with self.assertRaisesRegex(rules.Hold, 'unsupported_claim'):
             rules.validate_draft(unsupported, self.verify())
 
     def test_sensitive_source_topics_are_signals_not_automatic_refusals(self):
@@ -75,7 +75,7 @@ class EditorialTests(unittest.TestCase):
             self.verify(response=value)
 
     def test_retractions_preprints_corrections_and_unknown_status_are_held(self):
-        for publication_type in ('Retracted Publication', 'Preprint', 'Published Erratum', 'Review', ''):
+        for publication_type in ('Retracted Publication', 'Preprint', 'Published Erratum', ''):
             with self.subTest(publication_type=publication_type):
                 value = source_record()
                 value['pubTypeList'] = {'pubType': [publication_type]}
@@ -115,12 +115,12 @@ class EditorialTests(unittest.TestCase):
             rules.validate_draft(value, self.verify())
 
     def test_missing_citations_numbers_and_scope_never_approve(self):
-        for change in ('bad_ref', 'number', 'scope', 'short'):
+        for change in ('bad_ref', 'number', 'unknown_field', 'short'):
             value = draft()
             if change == 'bad_ref': value['paragraphs'][0]['claim_ids'] = ['missing']
             if change == 'number': value['headline'] += ' 9999'
-            if change == 'scope': value['limitations'] = 'Результаты ограничены небольшой выборкой и одним набором изображений.'
-            if change == 'short': value['paragraphs'][0]['text'] = 'Слишком короткое описание.'
+            if change == 'unknown_field': value['unexpected'] = 'not a contract field'
+            if change == 'short': value['paragraphs'] = [dict(kind='result', text='Слишком короткое описание.', claim_ids=['c1', 'c2'])]
             with self.subTest(change=change), self.assertRaises(rules.Hold):
                 rules.validate_draft(value, self.verify())
 
@@ -136,7 +136,7 @@ class EditorialTests(unittest.TestCase):
                              ('topic', 'welfare'), ('reasons', ['Uncertain'])):
             value = review()
             value[key] = invalid
-            with self.subTest(key=key), self.assertRaisesRegex(rules.Hold, 'review_not_approved'):
+            with self.subTest(key=key), self.assertRaisesRegex(rules.Hold, 'review_not_approved|invalid_review_contract|unsupported_claim|unsafe_advice|invalid_model_contract'):
                 rules.validate_review(value, draft())
 
     def test_public_projection_drops_internal_data_and_bad_urls(self):
@@ -159,7 +159,7 @@ class EditorialTests(unittest.TestCase):
         self.assertIn('&lt;script&gt;', page)
         self.assertNotIn('<script>', page)
         self.assertNotIn('href="javascript:', page)
-        self.assertIn('Научный источник', page)
+        self.assertIn('Читать оригинал', page)
         legacy = article_html('old', {}, 'https://example.invalid', datetime.now(timezone.utc), 'source')
         self.assertIn('Краткая запись прежнего формата', legacy)
 

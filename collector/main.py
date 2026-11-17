@@ -16,7 +16,7 @@ from psycopg.types.json import Jsonb
 import db
 
 SERVICE = "collector"
-MAX_NEW = 15
+MAX_NEW = 30
 LOOKBACK_DAYS = 90
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_RECORD_BYTES = 256 * 1024
@@ -27,7 +27,8 @@ MAX_EVERGREEN = 5
 MAX_RSS_ITEMS = 60
 RESEARCH_SOURCE = "Europe PMC: Dogs pilot"
 ARTICLE_SOURCE = "ScienceDaily: Dogs"
-QUOTAS = {RESEARCH_SOURCE: 10, ARTICLE_SOURCE: 5}
+from collector.sources import REGISTRY
+QUOTAS = {name: entry[2] for name, entry in REGISTRY.items()}
 
 DOG_WORDS = re.compile(
     r"\b(?:dogs?|canines?|canis (?:lupus )?familiaris|собак[а-яё]*|п[её]с|пс(?:а|ы|ов|у|ом|е|ам|ами|ах))\b", re.I
@@ -36,7 +37,7 @@ TOPIC_WORDS = re.compile(
     r"\b(?:behaviou?r(?:al|ally|s)?|cognit(?:ion|ive|ively)|emotion(?:s|al|ally)?|learn(?:ing|ed|s|t)?|"
     r"train(?:ing|ed|s|ers?|ability|able)?|welfare|well[- ]?being|enrich(?:ment|ed|ing|s)?|"
     r"поведен[а-яё]*|эмоци[а-яё]*|когнитив[а-яё]*|обуч[а-яё]*|дрессиров[а-яё]*|"
-    r"благополуч[а-яё]*|обогащ[а-яё]*)\b", re.I
+    r"благополуч[а-яё]*|обогащ[а-яё]*|питан[а-яё]*|нутриент[а-яё]*|рацион[а-яё]*|nutrition\w*|nutrient\w*|diet\w*)\b", re.I
 )
 # These are different meanings of "learning/behaviour", seen in live probes.
 # They must not turn imaging models or tumour biology into dog-behaviour candidates.
@@ -68,7 +69,8 @@ EUROPEPMC_TERMS = (
     ' OR TITLE:поведен* OR ABSTRACT:поведен* OR TITLE:эмоци* OR ABSTRACT:эмоци*'
     ' OR TITLE:когнитив* OR ABSTRACT:когнитив* OR TITLE:обуч* OR ABSTRACT:обуч*'
     ' OR TITLE:дрессиров* OR ABSTRACT:дрессиров* OR TITLE:благополуч* OR ABSTRACT:благополуч*'
-    ' OR TITLE:обогащ* OR ABSTRACT:обогащ*)'
+    ' OR TITLE:обогащ* OR ABSTRACT:обогащ* OR TITLE:nutrition* OR ABSTRACT:nutrition*'
+    ' OR TITLE:nutrient* OR ABSTRACT:nutrient* OR TITLE:diet* OR ABSTRACT:diet*)'
     ' AND (LANG:eng OR LANG:rus) AND SRC:MED'
 )
 
@@ -152,8 +154,14 @@ def valid_url(url):
 def fetch(url):
     if not valid_url(url):
         raise ValueError("invalid_source_url")
-    request = urllib.request.Request(url, headers={"User-Agent": "closer-to-dog/0.2"})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    from collector.sources import canonical
+    canonical(url)
+    class ApprovedRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            canonical(newurl)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+    request = urllib.request.Request(url, headers={"User-Agent": "closer-to-dog/0.7"})
+    with urllib.request.build_opener(ApprovedRedirect()).open(request, timeout=15) as response:
         body = response.read(MAX_RESPONSE_BYTES + 1)
     if len(body) > MAX_RESPONSE_BYTES:
         raise ValueError("response_too_large")
@@ -177,8 +185,8 @@ def publication_date(value, rss=False):
 
 def candidate(title, text, url, published, payload, scope, today, research=False, oldest=None, newest=None):
     try:
-        raw_record = payload["record"]
-        serialized = raw_record if isinstance(raw_record, str) else json.dumps(raw_record, ensure_ascii=False, allow_nan=False)
+        payload["record"]  # A faithful upstream record is required, not just generated metadata.
+        serialized = json.dumps(payload, ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError):
         raise InvalidRecord("invalid_payload") from None
     if len(serialized.encode("utf-8")) > MAX_RECORD_BYTES:
@@ -263,10 +271,10 @@ def read_europepmc(url, today, include_archive=True):
     return batch
 
 
-def read_rss(url, today):
+def read_rss(url, today, fetcher=None):
     batch = Batch()
     try:
-        root = ET.fromstring(fetch(url))
+        root = ET.fromstring((fetcher or fetch)(url))
         if root.tag != "rss" or root.find("channel") is None:
             raise ValueError("invalid_rss_response")
         records = root.findall("./channel/item")
@@ -302,71 +310,11 @@ def save_candidate(conn, source_id, run_id, item):
 
 
 def collect(conn, today=None):
+    from collector.sources import collect_sources
     today = today or utc_today()
     run_id = db.start_run(conn, SERVICE)
-    total = 0
-    evergreen = 0
     try:
-        sources = conn.execute(
-            "SELECT id, name, kind, url FROM sources WHERE active AND name = ANY(%s) ORDER BY id",
-            (list(QUOTAS),),
-        ).fetchall()
-        groups = []
-        for source_id, name, kind, url in sources:
-            reader = READERS.get(kind)
-            batch = reader(url, today) if reader else Batch(error="unsupported_source_kind")
-            ordered = sorted(batch.items, key=lambda item: not is_evergreen(item, today))
-            groups.append({"id": source_id, "name": name, "batch": batch, "queue": iter(ordered),
-                           "new": 0, "duplicates": 0, "evergreen": 0, "archive_skipped": 0})
-
-        def save_until(group, limit):
-            nonlocal total, evergreen
-            if group['new'] >= limit or total >= MAX_NEW:
-                return
-            for item in group["queue"]:
-                old = is_evergreen(item, today)
-                if old and evergreen >= MAX_EVERGREEN:
-                    group['archive_skipped'] += 1
-                    continue
-                if save_candidate(conn, group["id"], run_id, item):
-                    total += 1
-                    group["new"] += 1
-                    if old:
-                        evergreen += 1
-                        group['evergreen'] += 1
-                    if group["new"] >= limit or total >= MAX_NEW:
-                        break
-                else:
-                    group["duplicates"] += 1
-
-        # Reserve capacity for both groups before redistributing the unused slots.
-        for group in groups:
-            save_until(group, QUOTAS[group["name"]])
-        for group in groups:
-            if total < MAX_NEW:
-                save_until(group, group["new"] + MAX_NEW - total)
-        notes = [f"новых кандидатов: {total}; ожидают тематической обработки (collected)"]
-        notes.append(f"познавательных исследований прошлых лет: {evergreen}/{MAX_EVERGREEN}")
-        if total == MAX_NEW:
-            notes.append("достигнут общий лимит 15 новых кандидатов")
-        for group in groups:
-            batch = group["batch"]
-            note = (f"{group['name']}: просмотрено {batch.scanned}, новых {group['new']},"
-                    f" дублей {group['duplicates']}, пропуски {dict(batch.rejected)}")
-            if batch.limited:
-                note += "; достигнут предел просмотра, диапазон может быть просмотрен не полностью"
-            if batch.pages:
-                note += f"; страниц {batch.pages}/{MAX_PAGES}, архивных записей просмотрено {batch.archive_scanned}"
-            if group['archive_skipped']:
-                note += f"; отложено по лимиту архива {group['archive_skipped']}"
-            if batch.error:
-                note += f"; ошибка/частичный сбор: {batch.error}"
-            notes.append(note)
-        if not groups:
-            notes.append("нет активных согласованных источников")
-        note = " | ".join(notes)
-        if groups and not any(group["batch"].read_ok for group in groups):
-            raise RuntimeError(note)
+        total, note = collect_sources(conn, today, run_id, fetch)
         db.finish_run(conn, SERVICE, run_id, total, note)
         return total
     except Exception as error:

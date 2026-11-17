@@ -1,8 +1,9 @@
 """Read-only UTC budget reporting shared by worker and bot."""
 
-MAX_PUBLICATIONS = 3
-MAX_ATTEMPTS = 30
-MAX_MODEL_CALLS = 30
+TARGET_PUBLICATIONS = 5
+MAX_PUBLICATIONS = 8
+MAX_ATTEMPTS = 60
+MAX_MODEL_CALLS = 80
 
 
 class BudgetLimit(Exception):

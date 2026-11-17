@@ -52,6 +52,7 @@ class EditorialDatabaseTests(unittest.TestCase):
         patch.dict(os.environ, {'OPENROUTER_API_KEY': 'synthetic-test-key'}).start()
         patch.object(db, 'log').start()
         patch('urllib.request.urlopen', side_effect=AssertionError('External HTTP forbidden')).start()
+        patch('urllib.request.OpenerDirector.open', side_effect=AssertionError('External HTTP forbidden')).start()
         patch.object(db, 'connect', side_effect=self.connect).start()
         patch.object(rules, 'fetch', side_effect=self.fetch).start()
         self.model = patch.object(worker, 'ask_model', side_effect=self.model_answer).start()
@@ -154,29 +155,29 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.model.side_effect = [first_draft(make_draft()), bad_review]
         self.assertEqual(worker.process_new(self.conn), 0)
         self.assertEqual(self.conn.execute('SELECT status,editorial_result->>\'reason\' FROM materials WHERE id=%s', (mid,)).fetchone(),
-                         ('held', 'review_not_approved'))
+                         ('held', 'unsupported_claim'))
         self.assertEqual(self.conn.execute('SELECT count(*) FROM findings').fetchone()[0], 0)
-        self.assertIn('проверка текста не пройдена', bot.status_text(self.conn))
+        self.assertIn('нет подтверждения вывода', bot.status_text(self.conn))
 
     def test_publication_daily_cap_and_resume_do_not_repeat_model_calls(self):
-        for number in range(999999991, 999999995):
+        for number in range(999999991, 1000000000):
             self.candidate(number)
-        self.assertEqual(worker.process_new(self.conn), 3)
-        self.assertEqual(self.model.call_count, 6)
+        self.assertEqual(worker.process_new(self.conn), 8)
+        self.assertEqual(self.model.call_count, 16)
         self.assertEqual(self.conn.execute("SELECT count(*) FROM materials WHERE status='collected'").fetchone()[0], 1)
         self.assertEqual(worker.process_new(self.conn), 0)
-        self.assertEqual(self.model.call_count, 6)
+        self.assertEqual(self.model.call_count, 16)
 
     def test_attempt_limit_is_durable_for_unlinked_secondary_inputs(self):
-        for number in range(31):
+        for number in range(61):
             sid = self.conn.execute('SELECT id FROM sources LIMIT 1').fetchone()[0]
             self.conn.execute("INSERT INTO materials (source_id,url,title,text,raw_payload,content_scope,status) VALUES (%s,%s,'Dog learning','summary',%s,'feed_excerpt','collected')",
                               (sid, f'https://example.invalid/{number}', Jsonb({'provider': 'rss', 'record': '<item/>'})))
         self.assertEqual(worker.process_new(self.conn), 0)
-        self.assertEqual(self.count_runs('worker_attempt'), 30)
-        self.assertEqual(self.conn.execute("SELECT count(*) FROM materials WHERE status='held'").fetchone()[0], 30)
+        self.assertEqual(self.count_runs('worker_attempt'), 60)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM materials WHERE status='held'").fetchone()[0], 60)
         self.assertEqual(worker.process_new(self.conn), 0)
-        self.assertEqual(self.count_runs('worker_attempt'), 30)
+        self.assertEqual(self.count_runs('worker_attempt'), 60)
         runs_before = self.count_runs('worker')
         self.assertEqual(worker.process_new(self.conn), 0)
         self.assertEqual(self.count_runs('worker'), runs_before)
@@ -185,10 +186,10 @@ class EditorialDatabaseTests(unittest.TestCase):
 
     def test_model_call_limit_defers_without_calling_provider(self):
         mid = self.candidate()
-        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_model_call','failed' FROM generate_series(1,30)")
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_model_call','failed' FROM generate_series(1,80)")
         self.assertEqual(worker.process_new(self.conn), 0)
         self.model.assert_not_called()
-        self.assertEqual(self.count_runs('worker_model_call'), 30)
+        self.assertEqual(self.count_runs('worker_model_call'), 80)
         self.assertEqual(self.conn.execute('SELECT status FROM materials WHERE id=%s', (mid,)).fetchone()[0], 'collected')
 
     def test_utc_budget_ignores_previous_day_and_counts_failed_reservations(self):
@@ -314,7 +315,7 @@ class EditorialDatabaseTests(unittest.TestCase):
     def test_requeue_is_idempotent_and_never_erases_daily_budget(self):
         mid = self.candidate()
         self.old_hold(mid)
-        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,30)")
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,60)")
         self.assertTrue(requeue.requeue(self.conn, [mid], apply=True)[0]['requeued'])
         self.assertFalse(requeue.requeue(self.conn, [mid], apply=True)[0]['eligible'])
         self.old_hold(mid)  # even an old-looking audit cannot bypass durable history
@@ -322,7 +323,7 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.assertEqual(self.count_runs('worker_requeue'), 1)
         self.assertEqual(worker.process_new(self.conn), 0)
         self.model.assert_not_called()
-        self.assertEqual(self.count_runs('worker_attempt'), 30)
+        self.assertEqual(self.count_runs('worker_attempt'), 60)
 
     def test_requeue_batch_with_ineligible_row_makes_no_changes(self):
         first, second = self.candidate(), self.candidate(999999992)
@@ -436,13 +437,13 @@ class EditorialDatabaseTests(unittest.TestCase):
 
     def test_resuming_payment_pause_does_not_reset_exhausted_daily_attempts(self):
         self.candidate()
-        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,30)")
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,60)")
         provider.pause_provider(self.conn, {'http_status': 402})
         provider.resume_provider(self.conn, apply=True)
         self.assertFalse(provider.provider_status(self.conn)['paused'])
         self.assertEqual(worker.process_new(self.conn), 0)
         self.model.assert_not_called()
-        self.assertEqual(self.count_runs('worker_attempt'), 30)
+        self.assertEqual(self.count_runs('worker_attempt'), 60)
 
     def test_new_rules_allow_selected_old_provider_errors_to_requeue(self):
         mid = self.candidate()
@@ -453,16 +454,16 @@ class EditorialDatabaseTests(unittest.TestCase):
         previous = json.loads(self.conn.execute("SELECT note FROM runs WHERE service='worker_requeue'").fetchone()[0])
         self.assertEqual(previous['previous_result'], old)
 
-    def test_t15_fifteen_existing_attempts_allow_processing_and_thirty_block(self):
+    def test_t15_fifteen_existing_attempts_allow_processing_and_sixty_block(self):
         self.candidate()
         self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,15)")
         self.assertEqual(worker.process_new(self.conn), 1)
         self.assertEqual(self.count_runs('worker_attempt'), 16)
-        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,14)")
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_attempt','finished' FROM generate_series(1,44)")
         self.candidate(999999992)
         before = self.model.call_count
         self.assertEqual(worker.process_new(self.conn), 0)
-        self.assertEqual(self.count_runs('worker_attempt'), 30)
+        self.assertEqual(self.count_runs('worker_attempt'), 60)
         self.assertEqual(self.model.call_count, before)
 
     def staged_answer(self, phase, evidence, submitted=None):
@@ -482,15 +483,15 @@ class EditorialDatabaseTests(unittest.TestCase):
         self.assertEqual(self.count_runs('worker_model_call'), 6)
         audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0]
         self.assertEqual([e['outcome'] for e in audit['stages']], ['rejected', 'rejected', 'approved'])
-        self.assertEqual(bot.page_data(self.conn)['findings'][0]['article']['format_label'], 'Научная заметка')
+        self.assertEqual(bot.page_data(self.conn)['findings'][0]['article']['format_label'], 'Познавательный разбор')
         bot.handle(self.conn, {'chat': {'id': 42, 'type': 'private'}, 'text': '/start'})
-        self.assertIn('Научная заметка', self.messages()[0])
+        self.assertIn('Познавательный разбор', self.messages()[0])
         self.telegram.reset_mock()
         bot.send_new(self.conn)
-        self.assertIn('Научная заметка', self.messages()[0])
+        self.assertIn('Познавательный разбор', self.messages()[0])
         self.assertNotIn('Unsupported scope', self.messages()[0])
         status = bot.status_text(self.conn)
-        self.assertIn('попытки 1/30', status)
+        self.assertIn('попытки 1/60', status)
         self.assertIn('Научная заметка / публикация: опубликовано 1', status)
         self.assertNotIn('Unsupported scope', status)
 
@@ -509,7 +510,7 @@ class EditorialDatabaseTests(unittest.TestCase):
 
     def defer_second_stage(self):
         mid = self.candidate()
-        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_model_call','finished' FROM generate_series(1,27)")
+        self.conn.execute("INSERT INTO runs(service,status) SELECT 'worker_model_call','finished' FROM generate_series(1,77)")
         def answer(phase, evidence, submitted=None):
             value = self.staged_answer(phase, evidence, submitted)
             if phase == 'review' and evidence['_stage'] == 1:

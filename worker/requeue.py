@@ -22,6 +22,7 @@ RETRY_REASONS = {
     'model_invalid_envelope', 'model_empty_content', 'model_truncated',
     'model_incomplete', 'model_invalid_json', 'model_invalid_contract',
     'model_response_too_large',
+    'unsupported_claim', 'invalid_review_contract', 'unexpected_advice', 'readability_failed', 'overclaim',
 }
 
 

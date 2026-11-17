@@ -58,7 +58,7 @@ def material(number=999999991):
             "raw_payload": {"provider": "europepmc", "record": source_record(number)}}
 
 
-def draft(number=999999991):
+def legacy_draft(number=999999991):
     return {"about_dogs": True, "topic": "learning", "format": "research_explainer", "risk": "low",
             "headline": "Как собаки выбирали знакомое изображение в лабораторной задаче",
             "paragraphs": [
@@ -76,7 +76,13 @@ def draft(number=999999991):
             "needs_full_text": False, "contains_practical_advice": False}
 
 
+def draft(number=999999991):
+    old = legacy_draft(number)
+    return {**{k: old[k] for k in ('headline', 'topic', 'risk', 'paragraphs', 'claims')},
+            'material_type': 'research', 'advice_class': 'none', 'caveat': ''}
+
+
 def review():
-    return {"approved": True, "risk": "low", "about_dogs": True, "topic": "learning",
-            "all_claims_supported": True, "no_practical_advice": True, "limitations_adequate": True,
-            "no_overclaim": True, "source_sufficient": True, "owner_relevant": True, "plain_language": True, "reasons": []}
+    return dict(approved=True, risk='low', about_dogs=True, topic='learning', material_type='research',
+                all_claims_supported=True, advice_safe=True, no_overclaim=True, source_sufficient=True,
+                owner_relevant=True, plain_language=True, reasons=[])

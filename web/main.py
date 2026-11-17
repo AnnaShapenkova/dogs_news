@@ -34,7 +34,7 @@ PAGE = """<!doctype html>
 </style></head>
 <body><main>
 <h1>Ближе к собаке</h1>
-<div class="muted">Проверяемые объяснения исследований о поведении, обучении и благополучии собак.</div>
+<div class="muted">Интересные истории о поведении, обучении, повседневной жизни и питании собак — со ссылками на источники.</div>
 
 <div class="map">
   <div class="block"><b>Сбор</b><span>collector: обходит источники</span></div><div class="arrow">&rarr;</div>
@@ -66,9 +66,14 @@ def article_html(summary, payload, url, published, source):
         for paragraph in article['paragraphs']:
             kind = 'Результат исследования' if paragraph['kind'] == 'result' else 'Как это понимать'
             reference = html.escape(article['citations'][0]['url'], quote=True)
-            out.append(f'<p class="muted">{kind}</p><p>{html.escape(paragraph["text"])} <a href="{reference}" target="_blank" rel="noopener noreferrer">[1]</a></p>')
-        out.append(f'<h3>Что важно учитывать</h3><p>{html.escape(article["limitations"])}</p>')
-        out.append('<p class="muted">Основано на аннотации, полный текст не проверен</p><h3>Научный источник</h3>')
+            label = f'<p class="muted">{kind}</p>' if article['version'] == 1 else ''
+            out.append(label + f'<p>{html.escape(paragraph["text"])} <a href="{reference}" target="_blank" rel="noopener noreferrer">[1]</a></p>')
+        if article['version'] == 1:
+            out.append(f'<h3>Что важно учитывать</h3><p>{html.escape(article["limitations"])}</p>')
+            out.append('<p class="muted">Основано на аннотации, полный текст не проверен</p><h3>Научный источник</h3>')
+        else:
+            out.append('<p class="muted">' + html.escape(article.get('attribution', '')) + '</p>')
+            out.append('<p><a href="' + html.escape(article['original_url'], quote=True) + '" target="_blank" rel="noopener noreferrer">Читать оригинал' + (' · на английском' if article['source_language'] == 'en' else '') + '</a></p>')
         for citation in article['citations']:
             label = '. '.join(citation[key] for key in ('authors', 'title', 'journal', 'year') if citation[key])
             out.append(f'<p><a href="{html.escape(citation["url"], quote=True)}" target="_blank" rel="noopener noreferrer">{html.escape(label)}</a></p>')

@@ -8,7 +8,7 @@
 CREATE TABLE IF NOT EXISTS sources (
     id          SERIAL PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
-    kind        TEXT NOT NULL,            -- europepmc | rss (legacy kinds retained)
+    kind        TEXT NOT NULL,            -- europepmc | rss | owner_html | owner_rss | plos
     url         TEXT NOT NULL,
     active      BOOLEAN NOT NULL DEFAULT TRUE
 );
@@ -39,6 +39,24 @@ CREATE TABLE IF NOT EXISTS materials (
 ALTER TABLE materials ADD COLUMN IF NOT EXISTS raw_payload JSONB;
 ALTER TABLE materials ADD COLUMN IF NOT EXISTS content_scope TEXT NOT NULL DEFAULT 'legacy_unknown'
     CHECK (content_scope IN ('abstract', 'feed_excerpt', 'metadata_only', 'legacy_unknown'));
+
+-- T17: extend the actual existing CHECK, preserving every old scope and row.
+DO $$
+DECLARE constraint_row record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='materials'::regclass
+        AND contype='c' AND pg_get_constraintdef(oid) LIKE '%content_scope%page_excerpt%')
+       OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='materials'::regclass AND contype='c'
+           AND pg_get_constraintdef(oid) LIKE '%content_scope%' AND pg_get_constraintdef(oid) NOT LIKE '%page_excerpt%') THEN
+        FOR constraint_row IN SELECT conname FROM pg_constraint WHERE conrelid='materials'::regclass
+            AND contype='c' AND pg_get_constraintdef(oid) LIKE '%content_scope%'
+        LOOP
+            EXECUTE format('ALTER TABLE materials DROP CONSTRAINT %I', constraint_row.conname);
+        END LOOP;
+        ALTER TABLE materials ADD CONSTRAINT materials_content_scope_v7_check
+            CHECK (content_scope IN ('abstract','feed_excerpt','metadata_only','legacy_unknown','page_excerpt'));
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS findings (
     id              SERIAL PRIMARY KEY,
@@ -82,4 +100,12 @@ UPDATE sources SET active = FALSE WHERE url IN (
 INSERT INTO sources (name, kind, url) VALUES
     ('Europe PMC: Dogs pilot', 'europepmc', 'https://www.ebi.ac.uk/europepmc/webservices/rest/search'),
     ('ScienceDaily: Dogs', 'rss', 'https://www.sciencedaily.com/rss/plants_animals/dogs.xml')
+ON CONFLICT (name) DO NOTHING;
+
+-- New defaults only: never reactivate sources explicitly disabled by the operator.
+INSERT INTO sources(name,kind,url) VALUES
+ ('RKF: Owner guides','owner_html','https://rkf.org.ru/poleznye-materialy-o-sobakah/'),
+ ('Pets: Learning','owner_rss','https://vetandlife.ru/pets/vospitanie/feed/'),
+ ('Pets: Nutrition','owner_rss','https://vetandlife.ru/pets/zoo-menu/feed/'),
+ ('PLOS: Dogs','plos','https://api.plos.org/search')
 ON CONFLICT (name) DO NOTHING;

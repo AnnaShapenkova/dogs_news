@@ -8,6 +8,7 @@ from worker.budget import BudgetLimit
 SIMPLIFIABLE = {
     'invalid_article_length', 'missing_evidence_scope', 'not_russian', 'evergreen_as_news',
     'unverified_claim', 'unverified_number', 'unsupported_interpretation', 'invalid_stage_claim_count', 'readability_failed',
+    'unsupported_claim', 'overclaim', 'unexpected_advice',
 }
 
 
@@ -16,24 +17,28 @@ def public_text(draft):
         return ''
     paragraphs = draft.get('paragraphs')
     texts = [str(p.get('text', '')) for p in paragraphs if isinstance(p, dict)] if isinstance(paragraphs, list) else []
-    return ' '.join([str(draft.get('headline', '')), str(draft.get('limitations', '')), *texts])
+    return ' '.join([str(draft.get('headline', '')), str(draft.get('caveat', '')), *texts])
 
 
 def can_simplify(reason, draft, review=None):
     # Instructions in any model output are never fed to a further generation.
     if rules.INJECTION.search(json.dumps([draft, review], ensure_ascii=False)):
         return False
+    if review is not None:
+        try:
+            rules.validate_review_contract(review)
+        except rules.Hold:
+            return False
+        if not review['owner_relevant'] or not review['source_sufficient'] or review['risk'] != 'low' or not review['advice_safe']:
+            return False
     if reason == 'readability_failed':
         try:
             rules.validate_review_contract(review)
         except rules.Hold:
             return False
         return review['owner_relevant'] and review['source_sufficient'] and review['risk'] == 'low'
-    if reason in SIMPLIFIABLE or reason == 'risk_requires_review':
+    if reason in SIMPLIFIABLE:
         return True
-    if reason == 'draft_not_eligible' and isinstance(draft, dict):
-        return (draft.get('about_dogs') is True and draft.get('needs_full_text') is False
-                and draft.get('risk') in ('low', 'high') and draft.get('contains_practical_advice') is True)
     if reason == 'review_not_approved':
         try:
             rules.validate_review_contract(review)
@@ -41,8 +46,7 @@ def can_simplify(reason, draft, review=None):
             return False
         return (review['owner_relevant'] and review['about_dogs'] and review['source_sufficient'] and review['risk'] != 'unknown'
                 and isinstance(draft, dict) and review['topic'] == draft.get('topic')
-                and (bool(review['reasons']) or any(review[k] is False for k in
-                     ('all_claims_supported', 'no_practical_advice', 'limitations_adequate', 'no_overclaim'))))
+                and bool(review['reasons']))
     return False
 
 

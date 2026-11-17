@@ -260,8 +260,9 @@ const byTopic = (f, c) => c === "all" || f.reason === c;
 const visible = () => findings
   .filter((f) => inPeriod(f, state.period) && byTopic(f, state.topic))
   .sort((a, b) => b.date.localeCompare(a.date));
-const topicEmoji = (f) => ({ learning: "🎾", behavior: "🐕", welfare: "🐾" }[f.topic] || "🐾");
-const readerSource = (name) => ({ "Europe PMC: Dogs pilot": "Europe PMC", "ScienceDaily: Dogs": "ScienceDaily" }[name] || name);
+const topicEmoji = (f) => ({ learning: "🎾", behavior: "🐕", welfare: "🐾", nutrition: "🦴" }[f.topic] || "🐾");
+const readerSource = (name) => ({ "Europe PMC: Dogs pilot": "Europe PMC", "ScienceDaily: Dogs": "ScienceDaily",
+  "RKF: Owner guides": "РКФ", "Pets: Learning": "Питомцы", "Pets: Nutrition": "Питомцы", "PLOS: Dogs": "PLOS" }[name] || name);
 
 /* ---------- filters ---------- */
 function renderFilters() {
@@ -322,16 +323,18 @@ function renderDetail(f) {
     ${article.format_label ? `<span class="label">${esc(article.format_label)}</span>` : ""}
     ${article.context_note ? `<p class="excerpt">${esc(article.context_note)}</p>` : ""}
     ${paragraphs.length ? paragraphs.map((p) => `<section>
-      <span class="label">${p.kind === "interpretation" ? "Как это понимать" : "Результат исследования"}</span>
+      ${article.version === 2 ? "" : `<span class="label">${p.kind === "interpretation" ? "Как это понимать" : "Результат исследования"}</span>`}
       <p class="excerpt" style="color:var(--fg)">${esc(p.text)} <a href="#source-${f.id}-1" aria-label="Источник">[1]</a></p>
     </section>`).join("") : `<p class="orig">Краткая запись прежнего формата. ${esc(f.title)}</p>`}
     ${article.limitations ? `<section class="limitations-panel"><h3>Что важно учитывать</h3><p class="excerpt">${esc(article.limitations)}</p>
       <p class="label">Основано на аннотации, полный текст не проверен</p></section>` : ""}
     ${tags(f).length ? `<div class="tags">${tags(f).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>` : ""}
-    ${citations.length ? `<section class="sources-panel"><h3>Научный источник</h3>${citations.map((c, i) => `
+    ${article.version === 2 ? `<p class="label">${esc(article.attribution || "")} · ${article.evidence_scope === "abstract" ? "По аннотации" : "По материалу источника"}</p>` : ""}
+    ${article.version === 2 && /^https?:\/\//i.test(article.original_url || "") ? `<p><a href="${esc(article.original_url)}" target="_blank" rel="noopener noreferrer">Читать оригинал${article.source_language === "en" ? " · на английском" : ""} ↗</a></p>` : ""}
+    ${citations.length ? `<section class="sources-panel"><h3>${article.version === 2 ? "Источники" : "Научный источник"}</h3>${citations.map((c, i) => `
       <p id="source-${f.id}-${i + 1}" class="excerpt">[${i + 1}] ${esc(c.authors)}. ${esc(c.title)}.
       ${esc(c.journal)} ${esc(c.year)}.
-      ${/^https?:\/\//i.test(c.url || "") ? `<a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">Открыть аннотацию</a>` : ""}
+      ${/^https?:\/\//i.test(c.url || "") ? `<a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${article.version === 2 ? "Открыть источник" : "Открыть аннотацию"}</a>` : ""}
       ${c.doi ? `<span> DOI: ${esc(c.doi)}</span>` : ""}</p>`).join("")}</section>` : ""}
     ${!inTelegram && /^https?:\/\//i.test(f.url || "") ? `<button class="btn main" data-url="${esc(f.url)}">Открыть исходную запись</button>` : ""}
   </article>`;

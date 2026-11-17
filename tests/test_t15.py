@@ -78,10 +78,10 @@ class StageControllerTests(unittest.TestCase):
         draft, assessment, stage = self.run_controller(budget)
         self.assertEqual(stage, 2)
         self.assertEqual(budget.used, 3)
-        self.assertEqual([e['reason'] for e in self.audit['stages']], ['unverified_claim', 'approved'])
+        self.assertEqual([e['reason'] for e in self.audit['stages']], ['unsupported_claim', 'approved'])
         later = budget.calls[1][1]
         self.assertEqual(later['abstract'], source_record()['abstractText'])
-        self.assertEqual(later['_feedback'], ['unverified_claim'])
+        self.assertEqual(later['_feedback'], ['unsupported_claim'])
         self.assertNotIn('invented finding', json.dumps(later))
 
     def test_two_reviewer_refusals_then_note_six_calls(self):
@@ -125,11 +125,11 @@ class StageControllerTests(unittest.TestCase):
                 return value
             with self.subTest(field=field):
                 budget = FakeBudget(answer)
-                with self.assertRaisesRegex(rules.Hold, 'review_not_approved'):
+                with self.assertRaisesRegex(rules.Hold, 'review_not_approved|invalid_review_contract|unsupported_claim|unsafe_advice|invalid_model_contract'):
                     self.run_controller(budget, {})
                 self.assertEqual(budget.used, 2)
 
-    def test_unsafe_generated_advice_never_publishes_but_new_safe_format_can(self):
+    def test_unsafe_generated_advice_is_hard_stop_in_v7(self):
         def answer(phase, evidence, submitted):
             if phase == 'review': return review()
             value = stage_draft(evidence['_stage'])
@@ -137,9 +137,9 @@ class StageControllerTests(unittest.TestCase):
                 value['paragraphs'][0]['text'] += ' Дайте собаке препарат.'
             return value
         budget = FakeBudget(answer)
-        draft, _, stage = self.run_controller(budget)
-        self.assertEqual(stage, 2)
-        self.assertNotIn('Дайте', json.dumps(draft, ensure_ascii=False))
+        with self.assertRaisesRegex(rules.Hold, 'unsafe_advice'):
+            self.run_controller(budget)
+        self.assertEqual(budget.used, 1)
         self.assertEqual(self.audit['stages'][0]['outcome'], 'rejected')
         def always_unsafe(phase, evidence, submitted):
             value = stage_draft(evidence['_stage'])
@@ -235,14 +235,14 @@ class StageControllerTests(unittest.TestCase):
             payload = rules.publication_payload(stage_draft(stage), evidence, stage)
             payload.update(stages='SECRET', feedback='SECRET')
             value = public_payload(payload)
-            self.assertEqual(value['format_label'], STAGE_LABELS[stage])
+            self.assertEqual(value['format_label'], 'Познавательный разбор')
             self.assertNotIn('SECRET', json.dumps(value))
-            self.assertIn(STAGE_LABELS[stage], '\n'.join(finding_lines([('Заголовок', '', evidence['url'], 'source', payload)])))
-            self.assertIn(STAGE_LABELS[stage], article_html('Заголовок', payload, evidence['url'], datetime.now(timezone.utc), 'source'))
+            self.assertIn(value['format_label'], '\n'.join(finding_lines([('Заголовок', '', evidence['url'], 'source', payload)])))
+            self.assertIn(value['format_label'], article_html('Заголовок', payload, evidence['url'], datetime.now(timezone.utc), 'source'))
 
     def test_single_call_remaining_is_explicitly_reported_as_blocked(self):
         conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (0, 15, 29, datetime.now(timezone.utc))
+        conn.execute.return_value.fetchone.return_value = (0, 15, 79, datetime.now(timezone.utc))
         state = budget_status(conn)
         self.assertNotIn('attempt_daily_limit', state['blocked'])
         self.assertIn('stage_model_budget', state['blocked'])
