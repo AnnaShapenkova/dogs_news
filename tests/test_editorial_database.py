@@ -49,7 +49,7 @@ class EditorialDatabaseTests(unittest.TestCase):
         db.init_schema(self.conn)
         self.records = {}
         self.addCleanup(patch.stopall)
-        patch.dict(os.environ, {'OPENROUTER_API_KEY': 'synthetic-test-key'}).start()
+        patch.dict(os.environ, {'AITUNNEL_API_KEY': 'synthetic-test-key'}).start()
         patch.object(db, 'log').start()
         patch('urllib.request.urlopen', side_effect=AssertionError('External HTTP forbidden')).start()
         patch('urllib.request.OpenerDirector.open', side_effect=AssertionError('External HTTP forbidden')).start()
@@ -634,7 +634,7 @@ class EditorialDatabaseTests(unittest.TestCase):
 
     def seed_old_checkpoint(self, mid, outcome, paid=False):
         old = dict(version=2, material_id=mid, input_hash=rules.input_hash(material()),
-                   rules_version='dogs-pilot-v5', prompt_version='dogs-v5', model=worker.MODEL,
+                   rules_version='dogs-pilot-v5', prompt_version='dogs-v5', model=worker.DRAFT_MODEL,
                    next_stage=1, stages=[dict(stage=1, outcome=outcome, draft=make_draft())])
         self.conn.execute("INSERT INTO runs(service,status,note) VALUES ('worker_attempt','finished',%s)",
                           (json.dumps(dict(version=2, material_id=mid, rules='dogs-pilot-v5', checkpoint=old)),))
@@ -644,15 +644,56 @@ class EditorialDatabaseTests(unittest.TestCase):
                                                phase='draft' if outcome == 'generating' else 'review')),))
         return old
 
-    def test_t16_known_old_checkpoint_starts_new_audience_assessment(self):
+    def test_t18_incompatible_old_checkpoint_is_not_regenerated(self):
         mid = self.candidate()
         old = self.seed_old_checkpoint(mid, 'draft_ready')
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.model.assert_not_called()
+        self.assertEqual(self.conn.execute("SELECT status,editorial_result->>'reason' FROM materials WHERE id=%s", (mid,)).fetchone(), ('held', 'legacy_checkpoint_incompatible'))
+
+    def test_t18_v7_draft_gets_haiku_review_and_preserves_generator(self):
+        mid = self.candidate()
+        old = dict(version=3, material_id=mid, input_hash=rules.input_hash(material()),
+                   rules_version='dogs-pilot-v7', prompt_version='dogs-v7',
+                   model='anthropic/claude-haiku-5.5', editorial_fit=editorial_fit(),
+                   next_stage=1, stages=[dict(stage=1, outcome='approved', draft=make_draft(), review=review())])
+        self.conn.execute("INSERT INTO runs(service,status,note) VALUES ('worker_attempt','finished',%s)",
+                          (json.dumps(dict(version=2, material_id=mid, rules='dogs-pilot-v7', checkpoint=old)),))
         self.assertEqual(worker.process_new(self.conn), 1)
-        self.assertEqual(self.model.call_count, 2)
+        self.assertEqual(self.model.call_count, 1)
+        self.assertEqual(self.model.call_args.args[0], 'review')
         audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0]
         self.assertEqual(audit['migration_history'], old)
-        self.assertEqual(audit['editorial_fit']['audience'], 'general_owner')
-        self.assertEqual(audit['rules_version'], 'dogs-pilot-v6')
+        self.assertEqual(audit['stages'][0]['review_origin']['model'], worker.REVIEW_MODEL)
+        self.assertEqual(self.conn.execute('SELECT model FROM findings WHERE material_id=%s', (mid,)).fetchone()[0], old['model'])
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.assertEqual(self.model.call_count, 1)
+
+    def test_t18_changed_model_config_holds_without_paid_replay(self):
+        from worker.config import configured_models
+        mid = self.candidate()
+        checkpoint = dict(input_hash=rules.input_hash(material()), prompt_version=worker.PROMPT_VERSION,
+                          model_config=dict(configured_models(), review_model='previous-review-model'),
+                          stages=[dict(stage=1, outcome='draft_ready', draft=make_draft())])
+        self.conn.execute("INSERT INTO runs(service,status,note) VALUES ('worker_attempt','finished',%s)",
+                          (json.dumps(dict(version=2, material_id=mid, rules=rules.RULES_VERSION, checkpoint=checkpoint)),))
+        self.assertEqual(worker.process_new(self.conn), 0)
+        self.model.assert_not_called()
+        audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0]
+        self.assertEqual(audit['reason'], 'input_changed')
+        self.assertEqual(audit['model_config'], checkpoint['model_config'])
+
+    def test_t18_two_models_share_reservations_and_keep_origins(self):
+        mid = self.candidate()
+        self.assertEqual(worker.process_new(self.conn), 1)
+        rows = self.conn.execute("SELECT note FROM runs WHERE service='worker_model_call' ORDER BY id").fetchall()
+        notes = [json.loads(row[0]) for row in rows]
+        self.assertEqual([(n['phase'], n['provider'], n['model']) for n in notes],
+                         [('draft', 'aitunnel', worker.DRAFT_MODEL), ('review', 'aitunnel', worker.REVIEW_MODEL)])
+        audit = self.conn.execute('SELECT editorial_result FROM materials WHERE id=%s', (mid,)).fetchone()[0]
+        self.assertEqual(audit['stages'][0]['draft_origin']['model'], worker.DRAFT_MODEL)
+        self.assertEqual(audit['stages'][0]['review_origin']['model'], worker.REVIEW_MODEL)
+        self.assertEqual(worker.budget_status(self.conn)['model_calls'], 2)
 
     def test_t16_unknown_old_paid_response_is_held_without_new_calls(self):
         mid = self.candidate()

@@ -214,7 +214,7 @@ class CollectorDatabaseTests(unittest.TestCase):
         patch('urllib.request.urlopen', side_effect=AssertionError('External HTTP forbidden in tests')).start()
         patch('urllib.request.OpenerDirector.open', side_effect=AssertionError('External HTTP forbidden in tests')).start()
         patch('collector.sources.time.sleep').start()
-        patch.dict(os.environ, {'OPENROUTER_API_KEY': ''}).start()
+        patch.dict(os.environ, {'AITUNNEL_API_KEY': ''}).start()
 
     def init(self):
         db.init_schema(self.conn)

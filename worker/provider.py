@@ -1,4 +1,4 @@
-"""Durable OpenRouter payment pause. Preview by default; --resume is explicit.
+"""Durable provider payment pause, including legacy events. Preview by default.
 
 python -m worker.provider
 python -m worker.provider --resume
@@ -27,6 +27,10 @@ def safe_diagnostics(value):
         return output
     if type(value.get('http_status')) is int and 100 <= value['http_status'] <= 599:
         output['http_status'] = value['http_status']
+    if value.get('provider') == 'aitunnel':
+        output['provider'] = 'aitunnel'
+    if value.get('error_type') == 'insufficient_balance':
+        output['error_type'] = 'insufficient_balance'
     for key, allowed in (('limit_source', LIMIT_SOURCES), ('payment_reason', PAYMENT_REASONS)):
         item = value.get(key)
         if isinstance(item, str) and item in allowed:
@@ -89,8 +93,9 @@ def resume_provider(conn, apply=False):
 
 def provider_text(state):
     if not state['paused']:
-        return 'Паузы оплаты OpenRouter нет.'
-    text = 'Обработка приостановлена: ограничение оплаты/кредитов OpenRouter (HTTP 402).'
+        return 'Паузы оплаты провайдера нет. Текущий провайдер: AITunnel.'
+    source = 'AITunnel' if state.get('provider') == 'aitunnel' else 'провайдера (историческое событие до T18)'
+    text = f'Обработка приостановлена: ограничение оплаты {source} (HTTP 402).'
     names = {'openrouter_credits': 'ограничение доступных средств или резерва запроса',
              'openrouter_key_limit': 'лимит API-ключа',
              'openrouter_in_flight_budget': 'резерв под текущие или недавно завершённые запросы'}

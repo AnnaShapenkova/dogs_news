@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from collector.main import fetch, plain_text, DOG_WORDS, has_animal_topic, STAFF_TRAINING
 from publication import TOPICS, FORMATS
 
-RULES_VERSION = "dogs-pilot-v7"
+RULES_VERSION = "dogs-pilot-v8"
 STAGES = {
     1: dict(words=(60, 120), paragraphs=(1, 3), claims=(1, 3)),
     2: dict(words=(40, 100), paragraphs=(1, 3), claims=(1, 3)),

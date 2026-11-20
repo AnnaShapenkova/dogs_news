@@ -1,7 +1,6 @@
 """The dog editorial pilot: source -> draft -> review -> atomic publication."""
 
 import json
-import os
 import re
 import socket
 import time
@@ -15,10 +14,10 @@ import db
 from worker import editorial as rules
 from worker.budget import MAX_PUBLICATIONS, MAX_ATTEMPTS, MAX_MODEL_CALLS, budget_status, budget_text, BudgetLimit
 from worker.provider import WORKER_LOCK, safe_diagnostics, pause_provider, provider_status, provider_text
+from worker.config import PROVIDER, ENDPOINT, configured_models, api_key, model_for, DRAFT_MODEL, REVIEW_MODEL
 
 SERVICE = "worker"
-MODEL = os.environ.get("MODEL", "anthropic/claude-haiku-5.5")
-PROMPT_VERSION = "dogs-v7"
+PROMPT_VERSION = "dogs-v8"
 OUTPUT_TOKENS = {'draft': 6000, 'review': 2400}
 POLL_SECONDS = 10
 BUDGET_LOCK = 4210
@@ -77,6 +76,7 @@ def http_error_diagnostics(error):
     if error.code != 402:
         error.close()
         return diagnostics
+    diagnostics['provider'] = PROVIDER
     try:
         retry = error.headers.get('Retry-After') if error.headers else None
         if isinstance(retry, str) and len(retry.strip()) <= 6 and retry.strip().isascii() and retry.strip().isdigit():
@@ -85,6 +85,8 @@ def http_error_diagnostics(error):
         if len(data) <= 32 * 1024:
             value = json.loads(data)
             detail = value.get('error') if isinstance(value, dict) else None
+            if isinstance(detail, dict):
+                diagnostics['error_type'] = detail.get('type')
             metadata = detail.get('metadata') if isinstance(detail, dict) else None
             if isinstance(metadata, dict):
                 diagnostics['limit_source'] = metadata.get('limit_source')
@@ -98,19 +100,22 @@ def http_error_diagnostics(error):
 
 def ask_model(stage, evidence, draft=None):
     """Only this function calls the configured model; callers reserve the budget first."""
+    selected_model = model_for(stage)
+    if not api_key():
+        raise rules.Failure('model_not_configured')
     format_stage = evidence.get('_stage', 1)
     content = dict(source={key: value for key, value in evidence.items() if not key.startswith('_')},
                    stage=format_stage, stage_requirements=rules.STAGES[format_stage],
                    feedback=evidence.get('_feedback', []), draft=draft,
                    needs_editorial_fit=stage == 'draft' and '_fit' not in evidence,
                    editorial_fit=evidence.get('_fit'))
-    body = {"model": MODEL, "temperature": 0.2, "max_tokens": OUTPUT_TOKENS[stage],
+    body = {"model": selected_model, "temperature": 0.2, "max_tokens": OUTPUT_TOKENS[stage],
             "messages": [{"role": "system", "content": DRAFT_PROMPT if stage == "draft" else REVIEW_PROMPT},
                          {"role": "user", "content": json.dumps(content, ensure_ascii=False)}],
             "response_format": {"type": "json_object"}}
     request = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions", data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}", "Content-Type": "application/json"})
+        ENDPOINT, data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {api_key()}", "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             data = response.read(128 * 1024 + 1)
@@ -123,7 +128,9 @@ def ask_model(stage, evidence, draft=None):
         raise rules.Failure(reason) from None
     except OSError:
         raise rules.Failure("model_connection_error") from None
-    return parse_model_response(data)
+    answer = parse_model_response(data)
+    answer.diagnostics.update(provider=PROVIDER, model=selected_model)
+    return answer
 
 
 class Budget:
@@ -151,7 +158,8 @@ class Budget:
                    AND started_at < (date_trunc('day',stamp.t AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') + interval '1 day') < %s
                 RETURNING id""",
             (service, json.dumps(dict(version=2, material_id=material_id, rules=rules.RULES_VERSION,
-                                      phase=stage, format_stage=format_stage)), service, limit),
+                                      phase=stage, format_stage=format_stage,
+                                      provider=PROVIDER, model=model_for(stage) if service == 'worker_model_call' else None)), service, limit),
             ).fetchone()
         return row[0] if row else None
 
@@ -196,33 +204,16 @@ class Budget:
         current = next((value['checkpoint'] for _, value in entries if isinstance(value.get('checkpoint'), dict)), None)
         if current is not None:
             return current
+        from worker.recovery import LEGACY_RULES, migrate
         older = self.entries(material_id, 'worker_attempt', any_rules=True)
         previous = next((value['checkpoint'] for _, value in older
-                         if value.get('rules') in ('dogs-pilot-v5', 'dogs-pilot-v6') and isinstance(value.get('checkpoint'), dict)), None)
+                         if value.get('rules') in LEGACY_RULES and isinstance(value.get('checkpoint'), dict)), None)
+        calls = self.entries(material_id, 'worker_model_call', any_rules=True)
         if previous is None:
-            if self.entries(material_id, 'worker_model_call', any_rules=True):
+            if calls:
                 raise rules.Hold('uncertain_stage')
             return None
-        calls = self.entries(material_id, 'worker_model_call', any_rules=True)
-        old_stages = previous.get('stages', [])
-        if not isinstance(old_stages, list) or any(not isinstance(e, dict) for e in old_stages):
-            raise rules.Hold('uncertain_stage')
-        for entry in old_stages:
-            if entry.get('reason') == 'uncertain_stage':
-                raise rules.Hold('uncertain_stage')
-            if entry.get('outcome') in ('draft_ready', 'reviewing', 'review_ready', 'approved') and not isinstance(entry.get('draft'), dict):
-                raise rules.Hold('uncertain_stage')
-            if entry.get('outcome') in ('review_ready', 'approved') and not isinstance(entry.get('review'), dict):
-                raise rules.Hold('uncertain_stage')
-            phase = {'generating': 'draft', 'reviewing': 'review'}.get(entry.get('outcome'))
-            if phase and any(value.get('rules') in ('dogs-pilot-v5', 'dogs-pilot-v6') and value.get('format_stage') == entry.get('stage')
-                             and value.get('phase') == phase for _, value in calls):
-                raise rules.Hold('uncertain_stage')
-        if any(value.get('rules') in ('dogs-pilot-v5', 'dogs-pilot-v6') and not any(
-                entry.get('stage') == value.get('format_stage') for entry in old_stages) for _, value in calls):
-            raise rules.Hold('uncertain_stage')
-        return dict(input_hash=previous.get('input_hash'), prompt_version=PROMPT_VERSION, model=MODEL,
-                    migration_history=previous, next_stage=1, stages=[], stage=0)
+        return migrate(previous, calls, PROMPT_VERSION)
 
     def remaining_calls(self):
         return MAX_MODEL_CALLS - budget_status(self.conn)['model_calls']
@@ -232,8 +223,11 @@ class Budget:
                    for _, value in self.entries(material_id, 'worker_model_call'))
 
     def model(self, material_id, stage, evidence, draft=None):
+        configured_models()
         if provider_status(self.conn)['paused']:
             raise BudgetLimit('provider_payment_paused')
+        if not api_key():
+            raise rules.Failure('model_not_configured')
         format_stage = evidence.get('_stage', 1)
         call_id = self.reserve("worker_model_call", MAX_MODEL_CALLS, material_id, stage, format_stage)
         if call_id is None:
@@ -242,7 +236,7 @@ class Budget:
             answer = ask_model(stage, evidence, draft)
         except rules.Failure as error:
             self.diagnostics.append({"stage": stage, "format_stage": format_stage, "material_id": material_id,
-                                     "reason": str(error), **error.diagnostics})
+                                     "provider": PROVIDER, "model": model_for(stage), "reason": str(error), **error.diagnostics})
             self.finish(call_id, "failed", f"material {material_id}; {stage}; {error}")
             if error.diagnostics.get('http_status') == 402:
                 pause_provider(self.conn, error.diagnostics)
@@ -263,7 +257,7 @@ def published_today(conn):
     ).fetchone()[0]
 
 
-def insert_publication(conn, material_id, draft, payload):
+def insert_publication(conn, material_id, draft, payload, generator_model=None):
     # clock_timestamp(), not transaction-start now(), handles a model call spanning midnight.
     return conn.execute(
         """WITH stamp AS (SELECT clock_timestamp() AS t)
@@ -273,7 +267,7 @@ def insert_publication(conn, material_id, draft, payload):
                AND published_at >= (date_trunc('day',stamp.t AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
                AND published_at < (date_trunc('day',stamp.t AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') + interval '1 day') < %s
            ON CONFLICT DO NOTHING RETURNING id""",
-        (material_id, draft["headline"], MODEL, PROMPT_VERSION, Jsonb(payload), MAX_PUBLICATIONS),
+        (material_id, draft["headline"], generator_model or DRAFT_MODEL, PROMPT_VERSION, Jsonb(payload), MAX_PUBLICATIONS),
     ).fetchone()
 
 
@@ -299,8 +293,8 @@ def process_one(conn, budget):
         if attempt_id is None:
             return None
         audit = dict(previous) if isinstance(previous, dict) else {}
-        audit.update(version=3, material_id=mid, rules_version=rules.RULES_VERSION,
-                     prompt_version=PROMPT_VERSION, model=MODEL, attempt_id=attempt_id,
+        audit.update(version=4, material_id=mid, rules_version=rules.RULES_VERSION,
+                     prompt_version=PROMPT_VERSION, model=DRAFT_MODEL, attempt_id=attempt_id,
                      attempted_at=datetime.now(timezone.utc).isoformat())
         audit.setdefault('stage', 0)
         audit['phase'] = 'source'
@@ -311,8 +305,9 @@ def process_one(conn, budget):
             current_hash = rules.input_hash(material)
             if previous and (previous.get('input_hash') != current_hash
                              or previous.get('prompt_version') != PROMPT_VERSION
-                             or previous.get('model') != MODEL):
+                             or previous.get('model_config') != configured_models()):
                 raise rules.Hold('input_changed')
+            audit['model_config'] = configured_models()
             audit['input_hash'] = current_hash
             budget.checkpoint(attempt_id, audit)
             evidence = rules.verify_source(material)
@@ -333,7 +328,11 @@ def process_one(conn, budget):
                     or evidence['source_id'] != audit['verified_source']['source_id']):
                 raise rules.Hold('source_changed')
             rules.validate_draft(draft, evidence, stage)
-            if not insert_publication(conn, mid, draft, rules.publication_payload(draft, evidence, stage)):
+            generator = audit['stages'][stage - 1].get('draft_origin', {})
+            if not generator.get('model'):
+                raise rules.Hold('uncertain_stage')
+            audit['model'] = generator['model']
+            if not insert_publication(conn, mid, draft, rules.publication_payload(draft, evidence, stage), generator['model']):
                 if published_today(conn) >= MAX_PUBLICATIONS:
                     raise BudgetLimit('publication_daily_limit')
                 raise rules.Hold('duplicate_evidence_or_existing_finding')
@@ -357,8 +356,9 @@ def process_one(conn, budget):
     return outcome
 
 def process_new(conn):
-    if not os.environ.get("OPENROUTER_API_KEY", "").strip():
+    if not api_key():
         return 0
+    configured_models()
     if not conn.execute("SELECT 1 FROM materials WHERE status='collected' LIMIT 1").fetchone():
         return 0
     if not conn.execute("SELECT pg_try_advisory_lock(%s)", (WORKER_LOCK,)).fetchone()[0]:
@@ -395,15 +395,16 @@ def process_new(conn):
 
 
 def main():
+    configured_models()
     conn = db.connect()
     db.init_schema(conn)
-    db.log(SERVICE, f"editorial v7; model {MODEL}; limits {MAX_PUBLICATIONS}/{MAX_ATTEMPTS}/{MAX_MODEL_CALLS} UTC")
+    db.log(SERVICE, f"editorial v8; provider {PROVIDER}; draft {DRAFT_MODEL}; review {REVIEW_MODEL}; limits {MAX_PUBLICATIONS}/{MAX_ATTEMPTS}/{MAX_MODEL_CALLS} UTC")
     db.log(SERVICE, budget_text(budget_status(conn)))
     db.log(SERVICE, provider_text(provider_status(conn)))
-    if not os.environ.get("OPENROUTER_API_KEY", "").strip():
-        db.log(SERVICE, "OPENROUTER_API_KEY не задан: входы остаются collected, платные запросы не выполняются")
+    if not api_key():
+        db.log(SERVICE, "AITUNNEL_API_KEY не задан: входы остаются collected, платные запросы не выполняются")
         run_id = db.start_run(conn, SERVICE)
-        db.fail_run(conn, SERVICE, run_id, "OPENROUTER_API_KEY не задан; очередь collected сохраняется")
+        db.fail_run(conn, SERVICE, run_id, "AITUNNEL_API_KEY не задан; очередь collected сохраняется")
     while True:
         try:
             process_new(conn)

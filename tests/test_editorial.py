@@ -176,12 +176,12 @@ class EditorialTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *args): pass
             def read(self, size): return json.dumps({'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(review())}}]}).encode()
-        with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-secret'}), patch('urllib.request.urlopen', return_value=Response()) as network:
+        with patch.dict('os.environ', {'AITUNNEL_API_KEY': 'test-secret'}), patch('urllib.request.urlopen', return_value=Response()) as network:
             self.assertEqual(worker.ask_model('review', self.verify(), draft()), review())
             request = network.call_args.args[0]
             body = json.loads(request.data)
             self.assertEqual([m['role'] for m in body['messages']], ['system', 'user'])
-            self.assertEqual(body['model'], worker.MODEL)
+            self.assertEqual(body['model'], worker.REVIEW_MODEL)
             self.assertEqual(body['max_tokens'], 2400)
             self.assertNotIn('test-secret', body['messages'][1]['content'])
             self.assertEqual(network.call_args.kwargs['timeout'], 60)

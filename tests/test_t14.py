@@ -25,7 +25,7 @@ class PaymentDiagnosticsTests(unittest.TestCase):
             error = payment_error({'limit_source': source, 'reason': reason, 'remedy_hint': 'SECRET',
                                    'api_key': 'SECRET'}, '12')
             value = worker.http_error_diagnostics(error)
-            self.assertEqual(value, dict(http_status=402, limit_source=source,
+            self.assertEqual(value, dict(http_status=402, provider='aitunnel', limit_source=source,
                                          payment_reason=reason, retry_after_seconds=12))
             self.assertNotIn('SECRET', json.dumps(value))
             self.assertTrue(error.closed)
@@ -34,20 +34,20 @@ class PaymentDiagnosticsTests(unittest.TestCase):
         for body in (b'not-json SECRET', b'null', b'[]', b'{"error":"SECRET"}', b'x' * 40000):
             with self.subTest(body=body[:20]):
                 value = worker.http_error_diagnostics(payment_error(body=body, retry='SECRET'))
-                self.assertEqual(value, {'http_status': 402})
+                self.assertEqual(value, {'http_status': 402, 'provider': 'aitunnel'})
         for retry in ('999999999999999', '-1', 'tomorrow', '86401', 'SECRET', '1.2'):
             self.assertEqual(worker.http_error_diagnostics(payment_error(
-                {'limit_source': 'SECRET', 'reason': 'SECRET'}, retry)), {'http_status': 402})
+                {'limit_source': 'SECRET', 'reason': 'SECRET'}, retry)), {'http_status': 402, 'provider': 'aitunnel'})
         self.assertEqual(provider.safe_diagnostics({'http_status': True, 'retry_after_seconds': True,
                                                    'limit_source': {}, 'payment_reason': []}), {})
 
     def test_http_402_is_not_retried_inside_model_call(self):
-        with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'SECRET'}), \
+        with patch.dict('os.environ', {'AITUNNEL_API_KEY': 'SECRET'}), \
                 patch('urllib.request.urlopen', side_effect=payment_error()) as network:
             with self.assertRaisesRegex(rules.Failure, 'model_http_error') as result:
                 worker.ask_model('draft', {})
         self.assertEqual(network.call_count, 1)
-        self.assertEqual(result.exception.diagnostics, {'http_status': 402})
+        self.assertEqual(result.exception.diagnostics, {'http_status': 402, 'provider': 'aitunnel'})
         self.assertNotIn('SECRET', str(result.exception))
 
 
@@ -57,12 +57,12 @@ class StageOutputTests(unittest.TestCase):
             response = MagicMock()
             response.__enter__.return_value.read.return_value = json.dumps(
                 {'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(answer)}}]}).encode()
-            with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'SECRET'}), \
+            with patch.dict('os.environ', {'AITUNNEL_API_KEY': 'SECRET'}), \
                     patch('urllib.request.urlopen', return_value=response) as network:
                 self.assertEqual(worker.ask_model(stage, {}, draft() if stage == 'review' else None), answer)
             body = json.loads(network.call_args.args[0].data)
             self.assertEqual(body['max_tokens'], limit)
-            self.assertEqual(body['model'], worker.MODEL)
+            self.assertEqual(body['model'], worker.model_for(stage))
             self.assertEqual(body['temperature'], 0.2)
             self.assertNotIn('reasoning', body)
 
@@ -79,13 +79,14 @@ class PauseControlsTests(unittest.TestCase):
         conn = MagicMock()
         conn.autocommit = True
         budget = worker.Budget(conn)
-        failure = rules.Failure('model_http_error', {'http_status': 402})
-        with patch.object(worker, 'provider_status', return_value={'paused': False}), \
+        failure = rules.Failure('model_http_error', {'http_status': 402, 'provider': 'aitunnel'})
+        with patch.dict('os.environ', {'AITUNNEL_API_KEY': 'synthetic'}), \
+                patch.object(worker, 'provider_status', return_value={'paused': False}), \
                 patch.object(budget, 'reserve', return_value=7), patch.object(budget, 'finish'), \
                 patch.object(worker, 'ask_model', side_effect=failure), patch.object(worker, 'pause_provider') as pause:
             with self.assertRaises(rules.Failure):
                 budget.model(1, 'draft', {})
-        pause.assert_called_once_with(conn, {'http_status': 402})
+        pause.assert_called_once_with(conn, {'http_status': 402, 'provider': 'aitunnel'})
 
     def test_existing_pause_prevents_budget_reservation_and_paid_call(self):
         conn = MagicMock()
@@ -101,7 +102,7 @@ class PauseControlsTests(unittest.TestCase):
     def test_paused_worker_creates_no_empty_runs_or_audit_connections(self):
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = (True,)
-        with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'synthetic'}), \
+        with patch.dict('os.environ', {'AITUNNEL_API_KEY': 'synthetic'}), \
                 patch.object(worker, 'budget_status', return_value={'blocked': []}), \
                 patch.object(worker, 'provider_status', return_value={'paused': True}), \
                 patch.object(worker.db, 'start_run') as start, patch.object(worker.db, 'connect') as connect:

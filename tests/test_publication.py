@@ -242,7 +242,7 @@ class PublicationTests(unittest.TestCase):
         with patch.object(worker, 'ask_model', return_value={
             'about_ai': True, 'entity': 'OpenAI', 'summary': 'SECRET_DRAFT',
             'publication_status': 'published',  # untrusted model output cannot grant publication
-        }) as model, patch.dict(os.environ, {'OPENROUTER_API_KEY': 'test-key'}):
+        }) as model, patch.dict(os.environ, {'AITUNNEL_API_KEY': 'test-key'}):
             worker.process_new(self.conn)
         model.assert_not_called()
         self.assertEqual(self.conn.execute('SELECT count(*) FROM findings WHERE material_id=%s', (material_id,)).fetchone()[0], 0)

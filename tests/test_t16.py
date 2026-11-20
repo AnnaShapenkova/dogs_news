@@ -146,7 +146,7 @@ class OwnerFitTests(unittest.TestCase):
             response = MagicMock()
             response.__enter__.return_value.read.return_value = json.dumps(
                 {'choices': [{'finish_reason': 'stop', 'message': {'content': '{}'}}]}).encode()
-            with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'SECRET'}), patch('urllib.request.urlopen', return_value=response) as call:
+            with patch.dict('os.environ', {'AITUNNEL_API_KEY': 'SECRET'}), patch('urllib.request.urlopen', return_value=response) as call:
                 worker.ask_model(phase, evidence)
             content = json.loads(json.loads(call.call_args.args[0].data)['messages'][1]['content'])
             self.assertEqual(content['needs_editorial_fit'], phase == 'draft' and fit is None)
@@ -160,6 +160,7 @@ class MigrationPolicyTests(unittest.TestCase):
         conn.autocommit = True
         budget = worker.Budget(conn)
         old = dict(input_hash='previous-hash', rules_version='dogs-pilot-v5',
+                   model='anthropic/claude-haiku-5.5', editorial_fit=editorial_fit(),
                    stages=[dict(stage=1, outcome=outcome, draft=stage_draft(1))], next_stage=1)
         def entries(mid, service, any_rules=False):
             if not any_rules: return []
@@ -169,21 +170,21 @@ class MigrationPolicyTests(unittest.TestCase):
         budget.entries = entries
         return budget, old
 
-    def test_known_old_draft_starts_new_fit_and_preserves_old_audit(self):
+    def test_known_old_draft_preserves_fit_and_old_audit_for_fresh_review(self):
         budget, old = self.budget_with_previous('draft_ready')
         value = budget.previous(1)
         self.assertEqual(value['migration_history'], old)
-        self.assertEqual(value['stages'], [])
+        self.assertEqual(value['stages'][0]['outcome'], 'draft_ready')
         self.assertEqual(value['next_stage'], 1)
         self.assertEqual(value['input_hash'], 'previous-hash')
-        self.assertNotIn('editorial_fit', value)
+        self.assertIn('editorial_fit', value)
 
     def test_unknown_old_paid_response_is_not_automatically_regenerated(self):
         for outcome in ('generating', 'reviewing'):
             budget, _ = self.budget_with_previous(outcome)
             with self.assertRaisesRegex(rules.Hold, 'uncertain_stage'): budget.previous(1)
         budget, _ = self.budget_with_previous('generating', calls=False)
-        self.assertEqual(budget.previous(1)['next_stage'], 1)
+        with self.assertRaisesRegex(rules.Hold, 'uncertain_stage'): budget.previous(1)
         budget, old = self.budget_with_previous('draft_ready')
         old['stages'][0].pop('draft')
         with self.assertRaisesRegex(rules.Hold, 'uncertain_stage'): budget.previous(1)

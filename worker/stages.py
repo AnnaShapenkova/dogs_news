@@ -3,6 +3,7 @@
 import json
 
 from worker import editorial as rules
+from worker.config import PROVIDER, model_for
 from worker.budget import BudgetLimit
 
 SIMPLIFIABLE = {
@@ -86,12 +87,16 @@ def run_stages(material, audit, budget, attempt_id):
             save()
             continue
         draft, review = entry.get('draft'), entry.get('review')
+        if entry.get('draft_origin', {}).get('provider') == 'openrouter':
+            # Migration does not authorize regenerating an incompatible paid legacy draft.
+            rules.validate_draft(draft, evidence, stage)
         try:
             if entry['outcome'] in ('pending', 'generating'):
                 audit['phase'] = 'generation'
                 if budget.phase_started(material['id'], stage, 'draft'):
                     raise rules.Failure('uncertain_stage')
                 entry['outcome'] = 'generating'
+                entry['draft_origin'] = dict(provider=PROVIDER, model=model_for('draft'))
                 save()
                 response = budget.model(material['id'], 'draft', evidence)
                 entry.update(response=response, outcome='response_ready')
@@ -124,6 +129,7 @@ def run_stages(material, audit, budget, attempt_id):
                 if budget.phase_started(material['id'], stage, 'review'):
                     raise rules.Failure('uncertain_stage')
                 entry['outcome'] = 'reviewing'
+                entry['review_origin'] = dict(provider=PROVIDER, model=model_for('review'))
                 save()
                 review = budget.model(material['id'], 'review', evidence, draft)
                 entry.update(review=review, outcome='review_ready')

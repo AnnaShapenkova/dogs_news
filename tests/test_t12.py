@@ -62,7 +62,7 @@ class ResponseTests(unittest.TestCase):
                   (TimeoutError('SECRET'), 'model_timeout'),
                   (urllib.error.URLError('SECRET'), 'model_connection_error')]
         for error, reason in errors:
-            with self.subTest(reason=reason), patch.dict('os.environ', {'OPENROUTER_API_KEY': 'SECRET'}), \
+            with self.subTest(reason=reason), patch.dict('os.environ', {'AITUNNEL_API_KEY': 'SECRET'}), \
                     patch('urllib.request.urlopen', side_effect=error):
                 with self.assertRaisesRegex(rules.Failure, reason) as result:
                     worker.ask_model('draft', {})
@@ -123,7 +123,7 @@ class BudgetReportingTests(unittest.TestCase):
     def test_exhausted_budget_creates_no_empty_worker_run(self):
         conn = MagicMock()
         conn.execute.return_value.fetchone.return_value = (True,)
-        with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'synthetic'}), \
+        with patch.dict('os.environ', {'AITUNNEL_API_KEY': 'synthetic'}), \
                 patch.object(worker, 'budget_status', return_value={'blocked': ['attempt_daily_limit']}), \
                 patch.object(worker.db, 'start_run') as start, patch.object(worker.db, 'connect') as connect:
             self.assertEqual(worker.process_new(conn), 0)
